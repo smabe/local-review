@@ -69,8 +69,27 @@ cp skill/SKILL.md ~/.claude/skills/local-review/SKILL.md
 cp -R scripts ~/.claude/skills/local-review/scripts
 ```
 
-Done. "Run a local review" in any session now triggers it. Non-Claude
-users: just use the command and prompt from the skill file directly.
+Done. "Run a local review" in any session now triggers it.
+
+### 4. Run one
+
+```bash
+cd <any repo with uncommitted changes>
+~/.claude/skills/local-review/scripts/review.sh
+```
+
+`scripts/review.sh` is the whole interface, for Claude users and everyone
+else alike. It checks the preconditions, loads the model if it is not
+already resident (and unloads it afterwards), assembles the round-capped
+prompt, runs pi, and audits the result. Nothing needs assembling by hand.
+
+One machine has one resident model, so reviews are serialised: a run holds a
+lock for its whole load/review/unload cycle, and a second run started while it
+is held exits immediately naming the process that holds it.
+
+Verify: in a repo with a deliberate bug, the script reports it as
+`FILE:LINE | confidence: ... / QUOTE: ... / DEFECT: ... / FAILURE: ...`
+followed by an audit line reading `audit: N tool call(s), 1 defect(s)`.
 
 ---
 
@@ -97,26 +116,62 @@ batch commands") which is **stability-critical**: LM Studio's MLX engine
 crashes on long single generations (~11K tokens). Capped rounds plus
 `maxTokens: 8192` keep every generation under the threshold.
 
-### The prompts
+### The system prompt is the quality lever
 
-Standard review:
+pi's default system prompt makes a coding assistant, not a reviewer, and
+the gap is large. `review.sh` replaces it with a reviewer persona whose
+rules were measured, 3 runs per arm, on a fixture holding one planted
+off-by-one and one deliberate-looking inconsistency:
 
-> Review the uncommitted changes in this repository for correctness bugs.
-> HARD BUDGET: at most 3 rounds of tool calls, then give your verdict with
-> whatever you have — batch commands (round 1: git status && git diff HEAD;
-> round 2: read the changed files). Report findings as 'file:line —
-> defect, concrete failure scenario', most severe first. If nothing is
-> wrong, say exactly 'No findings.'
+| | pi's default prompt | reviewer prompt |
+|---|---|---|
+| caught the planted bug | 3/3 | 3/3 |
+| bit the false-positive trap | 2/3 | 0/3 |
+| bogus claims on a docs-only diff | 0, 1, 3 | 0, 0, 0 |
 
-When you know what the diff is supposed to do, add the intent as a
-**judging frame** — measured to kill intended-change false positives while
-still catching real bugs next to them (a bolt-on "INTENT:" note does NOT
-work; the model echoes it and flags the change anyway):
+The two rules doing the work: **quote the exact offending line verbatim or
+the defect does not exist**, and **prose and documentation cannot contain a
+defect**. Drop either and the fabrications come back.
 
-> ... judging every change AGAINST THIS INTENT: \<one sentence\>. A change
-> that implements the stated intent is correct by definition; do not
-> report it. Report only defects that contradict the intent or are
-> unrelated to it.
+Findings come back structured — `FILE:LINE | confidence`, `QUOTE:`,
+`DEFECT:`, `FAILURE:` — which is what lets the script count them.
+
+### Every run is audited
+
+A local model will occasionally return something that reads like a review
+without having been one. `review.sh` therefore always runs pi in JSON mode,
+counts tool calls and structured defects, and prints them beneath the
+review:
+
+```
+local-review: audit: 4 tool call(s), 1 defect(s), 8672 tokens peak
+```
+
+The exit status carries the verdict, so a caller never has to parse prose:
+
+| status | meaning |
+|---|---|
+| 0 | clean — the output was exactly `No findings.` |
+| 4 | defects reported, all well-formed |
+| 3 | the verdict cannot be trusted |
+| 1 / 2 | error / usage |
+
+**Zero tool calls means the model never opened a file**, and that is a 3, not a
+pass. So is an empty response, a half-emitted finding, and a `No findings.`
+with explanatory text trailing it — a clean verdict has to be the whole output,
+not a phrase inside it. Only 0 means clean.
+
+### The intent frame, and what it costs
+
+When you know what the diff is supposed to do, `--intent "<one sentence>"`
+folds it in as a **judging frame** rather than a note — a bolt-on "INTENT:"
+preamble gets echoed and then ignored.
+
+The catch: **the frame inherits every error in the intent's source.** It
+suppresses false positives by making the intent unfalsifiable, and that
+holds just as well when the intent is wrong. Use it only for a change you
+made yourself and a sentence you are confident in, and skip it entirely for
+someone else's stated intent.
 
 ---
 
@@ -124,18 +179,29 @@ work; the model echoes it and flags the change anyway):
 
 | File | What it is |
 |---|---|
-| `skill/SKILL.md` | The Claude Code skill — invocation, prompts, preconditions, hard limits |
+| `scripts/review.sh` | **The entry point.** Preconditions, model load/unload, prompt assembly, and the run audit |
+| `skill/SKILL.md` | The Claude Code skill — invocation, the intent caveat, hard limits |
 | `models.example.json` | pi provider config for LM Studio (:1234) and llama-server (:8080) |
 | `scripts/llama_server.sh` | Fallback engine: serves a Qwen3-Coder GGUF via llama-server on :8080 — ~25% slower than MLX, zero crashes observed |
-| `scripts/local_review.py` | Legacy diff-pipe: posts a diff straight to the API, no agent loop. Only useful with *thinking* models, which review diffs well but cannot survive any local agent harness. Do NOT use the coder model with it — diff-blind, it fabricates findings |
+| `scripts/local_review.py` | Legacy diff-pipe: posts a diff straight to the API, no agent loop. Only useful with *thinking* models, which review diffs well but are too slow to finish agentically. Do NOT use the coder model with it — diff-blind, it fabricates findings |
 | `scripts/test_local_review_scope.py` | Regression tests for the diff-pipe's review scope (untracked files, empty repos) |
 
 ## Hard rules (each one was paid for)
 
-- **Model: Qwen3-Coder-30B-A3B, nothing else** for the agentic path.
-  Thinking models overflow the context in any local harness (measured:
-  DNF). A 9B produces slop. Newer Qwen3.6 models need a thinking-off
-  chat-template flag that LM Studio silently drops.
+- **Model: Qwen3-Coder-30B-A3B** for the agentic path. Two alternatives were
+  measured against a planted off-by-one and both lost. A **Qwen3.8-27B**
+  thinking model writes the best analysis of anything tested and finishes a
+  tiny diff in under two minutes, but a 19KB diff went unfinished at both 10
+  and 20 minutes. **Devstral Small 2 24B** missed the planted bug 8 times out
+  of 9 despite reading the diff every run — its higher SWE-bench score
+  measures *fixing* a bug you have been handed, which is the opposite of
+  detection. A 9B produces slop.
+- **Thinking cannot be limited through LM Studio.** Probed against its OpenAI
+  endpoint: `chat_template_kwargs.enable_thinking`, a top-level
+  `enable_thinking`, and `reasoning_effort` are all accepted and all ignored.
+  pi does not send a level either unless the provider declares a
+  `thinkingFormat` or `supportsReasoningEffort: true`. Seeing thinking blocks
+  in the event stream proves thinking happened, not that a level was honoured.
 - **Context stays at 49152.** A 96K attempt wired ~35 GB of memory and
   kernel-panicked a 48 GB machine. Leave LM Studio guardrails on Strict.
 - **Review diffs, not whole files.** Pointed at committed files with no
