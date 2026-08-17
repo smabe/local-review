@@ -38,14 +38,26 @@ Because one machine has one resident model, reviews are serialised: a run takes
 a lock for its whole load/review/unload cycle, and a second run started
 meanwhile exits immediately saying which process holds it.
 
-**Every run is audited.** The script counts tool calls and validated findings
-and prints them under the review. The exit status carries the verdict: **0**
-clean, **4** defects reported, **3** the verdict cannot be trusted. A 3 means
-the model read nothing, said nothing, or returned output that is neither an
-exact clean verdict nor complete findings — a half-emitted finding and a
-"No findings." with explanatory text after it both land here rather than
-passing as clean. The zero-tool-call case has already caught a real run
-against an unloaded model whose output looked like a review.
+**Every run is audited**, and the exit status carries the verdict: **0** clean,
+**4** defects reported, **3** the verdict cannot be trusted. Only 0 means clean.
+
+A 3 covers every way a run can look clean without being one:
+- no tool call **succeeded**, so the model read nothing (a tool that merely
+  started proves nothing — this has already caught a real run against an
+  unloaded model whose output read like a review)
+- the message carrying the verdict did not finish — truncated by the token cap,
+  aborted, or errored. A cut-off answer reads exactly like a clean one
+- the output is neither an exact clean verdict nor complete findings: a
+  half-emitted block, or "No findings." with explanatory text trailing it
+
+Only ASSISTANT messages are read as verdicts. Tool results arrive as their own
+messages and carry text — whole file contents — so anything else risks handing
+back a source file as the review.
+
+Status 4 certifies at least one complete finding block: FILE, QUOTE, DEFECT and
+FAILURE in order, non-empty, with a path-like header. QUOTE holds a copied
+source line, so `}`, `[weak self]` and `<div>` are all legitimate; only the
+prompt's own placeholders are rejected, and by exact match rather than shape.
 
 Also handled: a dead API server (reported with the fix, instead of surfacing
 pi's bare "Connection error"), a tree with nothing to review, untracked files

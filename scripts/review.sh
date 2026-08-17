@@ -7,6 +7,10 @@
 #   ./review.sh --rounds 5 --json
 #   ./review.sh --provider llamaserver --model local-reviewer
 #
+# This file is BYTE-IDENTICAL in smabe/abe-skills and the public smabe/local-review
+# (tests/test_local_review_audit.sh enforces it). Fix bugs here once; never
+# hand-adapt one copy.
+#
 # With LM Studio it manages the model's lifecycle: loads it if it isn't
 # resident, and unloads it afterwards -- but only if this run is what loaded
 # it. A model you loaded yourself is left exactly as it was found.
@@ -15,6 +19,7 @@ set -euo pipefail
 
 PROVIDER="lmstudio"
 MODEL="qwen/qwen3-coder-30b"
+MODEL_EXPLICIT=0
 CONTEXT_LENGTH=49152
 ROUNDS=3
 INTENT=""
@@ -22,7 +27,9 @@ RAW_STREAM=0
 RAW=""
 DIFF_TRUNCATION_BYTES=50000
 LOADED_BY_US=0
-LLAMA_URL="http://localhost:8080/v1/models"
+# Must match the llamaserver baseUrl in ~/.pi/agent/models.json. Overridable
+# because that config owns the real value and this is only a reachability probe.
+LLAMA_URL="${LOCAL_REVIEW_LLAMA_URL:-http://localhost:8080/v1/models}"
 
 # `lms` is on PATH for some installs and only under ~/.lmstudio for others.
 LMS="$(command -v lms 2>/dev/null || true)"
@@ -39,14 +46,15 @@ usage: review.sh [--intent SENTENCE] [--rounds N] [--json]
   --intent SENTENCE  Judge changes against this stated intent. One sentence,
                      about the change only. The reviewer treats anything
                      implementing it as correct by definition, so a wrong
-                     sentence hides real bugs -- read SKILL.md before using.
+                     sentence hides real bugs -- see SKILL.md before using.
   --rounds N         Tool-call budget (default 3). Raise to 4-5 when the
                      review needs a codebase search pass. The cap is a
                      stability guard, not a speed knob.
   --json             Print pi's raw JSON event stream instead of the review.
                      Every run is audited either way; this shows the evidence.
   --provider NAME    pi provider: lmstudio (default) or llamaserver.
-  --model ID         Model id as named in ~/.pi/agent/models.json.
+  --model ID         Model id as named in ~/.pi/agent/models.json. Auto-loading
+                     only knows the default, so load another one yourself.
 
 Exit status: 0 clean, 1 error, 2 usage, 3 the verdict cannot be trusted (the
 model read nothing, said nothing, or produced output that is neither a clean
@@ -60,13 +68,28 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --intent)   [ $# -ge 2 ] || usage; INTENT="$2"; shift 2 ;;
     --rounds)   [ $# -ge 2 ] || usage; ROUNDS="$2"; shift 2 ;;
-    --provider) [ $# -ge 2 ] || usage; PROVIDER="$2"; shift 2 ;;
-    --model)    [ $# -ge 2 ] || usage; MODEL="$2"; shift 2 ;;
     --json)     RAW_STREAM=1; shift ;;
+    --provider) [ $# -ge 2 ] || usage; PROVIDER="$2"; shift 2 ;;
+    --model)    [ $# -ge 2 ] || usage; MODEL="$2"; MODEL_EXPLICIT=1; shift 2 ;;
     -h|--help)  usage ;;
     *)          printf 'local-review: unknown argument: %s\n\n' "$1" >&2; usage ;;
   esac
 done
+
+case "$PROVIDER" in
+  lmstudio|llamaserver) ;;
+  *) printf 'local-review: unknown provider: %s\n\n' "$PROVIDER" >&2; usage ;;
+esac
+
+# The default model belongs to lmstudio. pi does not reject an id the provider
+# never defined -- it forwards it and the per-model sampling settings silently
+# do not apply -- so the pairing is enforced here. Keyed on whether --model was
+# PASSED, not on its value: a llamaserver model may legitimately be named the
+# same as our default.
+if [ "$PROVIDER" != "lmstudio" ] && [ "$MODEL_EXPLICIT" -eq 0 ]; then
+  printf 'local-review: --provider %s needs an explicit --model (the default is an LM Studio id)\n\n' "$PROVIDER" >&2
+  usage
+fi
 
 case "$ROUNDS" in
   ''|*[!0-9]*) die "--rounds needs a whole number, got '$ROUNDS'" ;;
@@ -75,7 +98,7 @@ esac
 
 # --- preconditions -----------------------------------------------------------
 
-command -v pi >/dev/null 2>&1 || die "pi is not on PATH -- see the README"
+command -v pi >/dev/null 2>&1 || die "pi is not on PATH -- install it first (brew install pi)"
 command -v python3 >/dev/null 2>&1 || die "python3 is not on PATH (needed to audit the run)"
 
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
@@ -84,19 +107,25 @@ git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
 if [ "$PROVIDER" = "lmstudio" ]; then
   [ -x "$LMS" ] || die "lms CLI not found (looked on PATH and at \$HOME/.lmstudio/bin/lms)"
 
-  # Match on output text, not exit status: the strings on the success path are
-  # known, the failure-path exit codes are not.
-  if ! "$LMS" server status 2>&1 | grep -qi 'running on port'; then
+  # Match on output text, not exit status: the failure-path exit codes are
+  # unverified, the strings on the success path are not. Capture BEFORE
+  # matching -- piping into grep under `set -o pipefail` reintroduces the
+  # dependency on lms's exit status that this check exists to avoid.
+  lms_status="$("$LMS" server status 2>&1 || true)"
+  if ! printf '%s' "$lms_status" | grep -qi 'running on port'; then
     die "LM Studio server is down on :1234 -- run: $LMS server start
      (after a reboot the model can be loadable while the server is not up;
       pi reports this only as a bare 'Connection error')"
   fi
 else
-  # llama-server has no CLI to interrogate; ask the endpoint itself.
-  if command -v curl >/dev/null 2>&1; then
-    curl -sf --max-time 5 "$LLAMA_URL" >/dev/null 2>&1 \
-      || die "no server answering at $LLAMA_URL -- start scripts/llama_server.sh first"
-  fi
+  # llama-server has no CLI to interrogate; ask the endpoint itself. NOT
+  # optional: skipping it when curl is missing reintroduces the bare
+  # "Connection error" this check exists to translate.
+  command -v curl >/dev/null 2>&1 \
+    || die "curl is needed to check the llama-server endpoint -- install it, or use the default provider"
+  curl -sf --max-time 5 "$LLAMA_URL" >/dev/null 2>&1 \
+    || die "no server answering at $LLAMA_URL -- start llama-server first
+     (scripts/llama_server.sh in the smabe/local-review repo does it)"
 fi
 
 # --- is there anything to review? --------------------------------------------
@@ -120,20 +149,15 @@ fi
 
 # --- model lifecycle ---------------------------------------------------------
 # Unload runs from an EXIT trap so it still happens on a failed review or a
-# Ctrl-C. It is a no-op unless this run is what loaded the model. llama-server
-# owns its own model for the life of the process, so this applies to LM Studio
-# only.
+# Ctrl-C. It is a no-op unless this run is what loaded the model.
 
-# One model, one review at a time. Reference counting cannot express who owns
-# the unload -- the loader may exit first, leaving nobody able to unload -- so
-# the whole load -> review -> unload lifecycle runs under a mutex instead. An
-# atomic mkdir is the primitive. The lock lives under the user's own cache
-# directory, never a world-writable one: a predictable name in shared /tmp is a
-# symlink attack on a multi-user host.
 LOCK=""
 acquire_lock() {
   local dir lock owner
-  dir="${XDG_CACHE_HOME:-$HOME/.cache}/local-review"
+  # Deliberately NOT XDG_CACHE_HOME: every run targets the same lms binary and
+  # the same server on :1234, so the lock has to be the same file regardless of
+  # what the environment says the cache directory is.
+  dir="$HOME/.cache/local-review"
   mkdir -p "$dir" 2>/dev/null || die "cannot create $dir"
   lock="$dir/model.lock"
   # `mkdir` is the entire protocol: it succeeds for exactly one process and
@@ -142,7 +166,11 @@ acquire_lock() {
   # and two contenders reading that gap can both decide to steal it. The EXIT
   # trap covers normal exits, Ctrl-C and SIGTERM, so a leftover lock means a
   # SIGKILL or a power cut, and clearing that is a deliberate human act.
+  # Nothing may interrupt between creating the lock and recording that we own
+  # it: the EXIT trap can only remove a lock it can see.
+  trap '' INT TERM
   if ! mkdir "$lock" 2>/dev/null; then
+    trap 'exit 130' INT; trap 'exit 143' TERM
     owner=$(cat "$lock/pid" 2>/dev/null || true)
     if [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null; then
       die "another local review (pid $owner) holds the model -- wait for it to finish"
@@ -150,25 +178,44 @@ acquire_lock() {
     die "a local review lock is present but its owner is gone.
      If no review is running: rm -rf \"$lock\""
   fi
-  printf '%s\n' "$$" > "$lock/pid"
+  # Ownership is recorded the instant the directory exists, BEFORE the PID
+  # write, which can fail or be interrupted. Nothing reclaims a stale lock any
+  # more, so one that cleanup cannot see is one a human has to delete.
   LOCK="$lock"
+  trap 'exit 130' INT; trap 'exit 143' TERM
+  printf '%s\n' "$$" > "$lock/pid" || note "could not record the lock owner pid"
 }
 
+# Every branch is an `if`, never a `&&` chain: bash adopts the trap's LAST
+# command status as the script's exit status, so a trailing failed test would
+# rewrite 0/3/4 into 1 and silently void the whole exit contract.
 cleanup() {
-  [ -n "$RAW" ] && rm -f "$RAW"
+  if [ -n "$RAW" ]; then rm -f "$RAW"; fi
   if [ "$LOADED_BY_US" -eq 1 ]; then
     note "unloading $MODEL"
     "$LMS" unload "$MODEL" >/dev/null 2>&1 || note "unload failed -- '$LMS ps' to check"
   fi
-  [ -n "$LOCK" ] && rm -rf "$LOCK"   # released last: the unload is part of what it guards
+  if [ -n "$LOCK" ]; then rm -rf "$LOCK"; fi  # last: the unload is what it guards
 }
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+# Unconditional: one machine serves one model at a time whichever provider is
+# in use (llama_server.sh runs llama-server with --parallel 1, a single slot),
+# and the lock has to be held for the whole run, not just the LM Studio
+# load/unload. Keeping it out of the branch also keeps LOCK non-empty, which is
+# what stops the EXIT trap rewriting the exit status on the llamaserver path.
+acquire_lock
+
+# llama-server owns its model for the life of the process, so the load/unload
+# below is LM Studio only.
 if [ "$PROVIDER" = "lmstudio" ]; then
-  acquire_lock
-  if "$LMS" ps 2>/dev/null | grep -qF "$MODEL"; then
+  # Captured for the same reason as the server check above: a non-zero lms
+  # exit must not be read as "the model is not loaded", or we would unload and
+  # reload a model the user loaded, and then unload it on exit.
+  lms_ps="$("$LMS" ps 2>/dev/null || true)"
+  if printf '%s' "$lms_ps" | grep -qF "$MODEL"; then
     note "$MODEL already loaded -- leaving it resident afterwards"
   else
     # Any resident model has to go first: the memory guardrail sizes the new
@@ -189,11 +236,11 @@ fi
 # --- prompt ------------------------------------------------------------------
 
 # The reviewer persona replaces pi's default coding-assistant system prompt.
-# Measured against the prompt-only setup, 3 runs per arm, on a fixture with one
-# planted off-by-one and one deliberate-looking-inconsistency trap: both caught
-# the real bug 3/3, but the old setup bit the trap 2/3 and invented 0-3 defects
-# per run on a docs-only diff, where this one reported nothing 3/3. Rules 1 and
-# 2 are what kill the fabrications -- do not drop them.
+# Measured 2026-08-17 against the previous prompt-only setup, 3 runs per arm on
+# a fixture with one planted off-by-one and one deliberate-looking-inconsistency
+# trap: both caught the real bug 3/3, but the old setup bit the trap 2/3 and
+# invented 0-3 defects per run on a docs-only diff, where this one reported
+# nothing 3/3. Rules 1 and 2 are what kill the fabrications -- do not drop them.
 SYSTEM_PROMPT='You are a code reviewer. You do not write, fix, or explain code, and you do not summarize changes.
 Your entire output is either a list of defects or the exact string "No findings." — never both.
 Rules you must obey:
@@ -227,10 +274,17 @@ fi
 # --- run ---------------------------------------------------------------------
 # Not exec'd: the process has to survive to run the unload trap.
 # --exclude-tools drops the mutation tools, but pi has NO OS-enforced sandbox
-# and its bash tool can still write. For enforced read-only, use a harness that
-# provides one (e.g. codex exec --sandbox read-only).
+# and its bash tool can still write. For enforced read-only, use the Codex
+# path in SKILL.md instead.
+#
+# The ${a[@]+"${a[@]}"} guard is required: macOS ships bash 3.2, where
+# expanding an empty array under `set -u` is an unbound-variable error.
 
 run_pi() {
+  # No --thinking here on purpose: pi only sends a reasoning level when the
+  # provider sets a thinkingFormat or supportsReasoningEffort, and LM Studio
+  # ignores every thinking-control field anyway (probed 2026-08-17). The flag
+  # would be inert -- see SKILL.md.
   pi --provider "$PROVIDER" --model "$MODEL" \
     --no-session -nc -ns --exclude-tools edit,write \
     --system-prompt "$SYSTEM_PROMPT" --mode json \
@@ -245,13 +299,14 @@ run_pi >"$RAW" || RC=$?
 # run is exactly what someone reaches for --json to detect.
 [ "$RAW_STREAM" -eq 1 ] && cat "$RAW"
 
-# Audit the run rather than trusting its prose. Three measured failure modes:
-# appending "No findings." underneath real findings, returning empty output,
-# and abandoning the required format.
+# Audit the run rather than trusting its prose. Three things the model has
+# been measured getting wrong: appending "No findings." underneath real
+# findings (2 of 7 runs), returning empty output, and abandoning the format.
 python3 - "$RAW" "$RAW_STREAM" <<'PY' || AUDIT=$?
 import json, re, sys
 
-texts, tools, peak = [], 0, 0
+texts, started, succeeded, peak = [], 0, 0, 0
+last_stop, last_error = None, None
 for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
     line = line.strip()
     if not line:
@@ -262,12 +317,22 @@ for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
         continue
     kind = ev.get("type")
     if kind == "tool_execution_start":
-        tools += 1
+        started += 1
+    elif kind == "tool_execution_end":
+        # A tool that STARTED proves nothing; one that failed read nothing.
+        if not ev.get("isError"):
+            succeeded += 1
     elif kind == "message_end":
         msg = ev.get("message", {}) or {}
         usage = msg.get("usage") or {}
         if isinstance(usage, dict):
             peak = max(peak, usage.get("totalTokens") or 0)
+        # ONLY assistant messages are verdicts. toolResult messages carry text
+        # too -- whole file contents -- and taking the last text block blindly
+        # can hand back a source file as if it were the review.
+        if msg.get("role") != "assistant":
+            continue
+        last_stop, last_error = msg.get("stopReason"), msg.get("isError")
         for block in msg.get("content", []) or []:
             if block.get("type") == "text" and block.get("text", "").strip():
                 texts.append(block["text"].strip())
@@ -280,19 +345,53 @@ review = texts[-1] if texts else ""
 # means a half-emitted block reads as malformed rather than as a defect.
 counts = {label: len(re.findall(r"^%s:" % label, review, re.M))
           for label in ("FILE", "QUOTE", "DEFECT", "FAILURE")}
-# A finding is the four labels in order, each carrying a non-empty value.
-# Counting labels alone accepted them shuffled, or present but empty.
-# The FILE value must look like a path -- one whitespace-free token containing
-# a dot, slash or colon (metrics.py:15, src/a.go, Makefile:12). That rejects a
-# header like "FILE: I could not determine the file" without rejecting the
-# three header shapes this model actually emits.
+# A finding is the four labels in order, each carrying a substantive value.
+# Counting labels alone accepted them shuffled or empty; accepting any
+# non-space value accepted the prompt's own template echoed back, which a
+# local model really does emit when it has nothing to say.
 BLOCK = re.compile(
-    r"^FILE:[ \t]*[^\s|]*[./:][^\s|]*.*\n(?:.*\n)*?"
-    r"^QUOTE:[ \t]*\S.*\n(?:.*\n)*?"
-    r"^DEFECT:[ \t]*\S.*\n(?:.*\n)*?"
-    r"^FAILURE:[ \t]*\S",
+    r"^FILE:[ \t]*(?P<file>[^\s|]+).*\n(?:.*\n)*?"
+    r"^QUOTE:[ \t]*(?P<quote>.*)\n(?:.*\n)*?"
+    r"^DEFECT:[ \t]*(?P<defect>.*)\n(?:.*\n)*?"
+    r"^FAILURE:[ \t]*(?P<failure>.*)$",
     re.M)
-blocks = len(BLOCK.findall(review + "\n"))
+
+# The prompt's own placeholders, echoed back verbatim when the model has
+# nothing to say. Matched EXACTLY, and kept in step with the PROMPT above by
+# hand: a general "anything in angle brackets" rule would discard a real
+# finding whose quoted line is "<div>" or "<Foo />", and square and round
+# brackets are ordinary source too ("[weak self]", "(status == 0)").
+PLACEHOLDERS = {
+    "<the offending line, copied verbatim>",
+    "<what is wrong with that line>",
+    "<concrete input or state that produces wrong behaviour>",
+    "file:line",
+}
+
+def is_placeholder(value):
+    v = value.strip()
+    return v.lower() in PLACEHOLDERS or bool(re.match(r"^\.{2,}$", v))
+
+def prose(value):
+    """A description field: must say something, not just punctuate."""
+    v = value.strip()
+    return bool(v) and bool(re.search(r"[A-Za-z0-9]", v)) and not is_placeholder(v)
+
+def valid(match):
+    path = match.group("file").strip()
+    if not re.search(r"[./:]", path) or not re.search(r"[A-Za-z0-9]", path):
+        return False                      # must look like a path, not prose
+    if is_placeholder(path):
+        return False
+    # QUOTE is a copied source line, so punctuation-only is legitimate -- a
+    # finding on a stray "}" is still a finding. Only non-empty and not a
+    # placeholder is required of it.
+    q = match.group("quote").strip()
+    if not q or is_placeholder(q):
+        return False
+    return all(prose(match.group(g)) for g in ("defect", "failure"))
+
+blocks = sum(1 for m in BLOCK.finditer(review + "\n") if valid(m))
 well_formed = blocks > 0 and all(v == blocks for v in counts.values())
 defects = blocks if well_formed else 0
 
@@ -306,14 +405,23 @@ if review and not raw_mode:   # raw mode already emitted the stream
 sys.stdout.flush()   # keep the footer below the review when stdout is a pipe
 
 warn = lambda m: sys.stderr.write("local-review: %s\n" % m)
-warn("audit: %d tool call(s), %d defect(s), %d tokens peak" % (tools, defects, peak))
+warn("audit: %d/%d tool calls ok, %d defect(s), %d tokens peak"
+     % (succeeded, started, defects, peak))
 
-if tools == 0:
-    warn("THIS REVIEW DID NOT HAPPEN -- the model answered without reading")
-    warn("anything. Do not treat it as clean. Re-run, and check the server.")
+if succeeded == 0:
+    warn("THIS REVIEW DID NOT HAPPEN -- no tool call succeeded, so the model")
+    warn("read nothing. Do not treat it as clean. Re-run, and check the server.")
     sys.exit(3)
 if not review:
-    warn("empty response after %d tool call(s) -- no verdict was given." % tools)
+    warn("empty response after %d tool call(s) -- no verdict was given." % started)
+    sys.exit(3)
+# A verdict is only a verdict if the message carrying it finished. An answer
+# cut short by a token cap, an abort or a stream error can read exactly like a
+# clean review.
+if last_error or last_stop != "stop":
+    warn("the reviewer did not finish cleanly (stopReason=%s%s) -- its answer"
+         % (last_stop, ", isError" if last_error else ""))
+    warn("may be truncated. Not a verdict.")
     sys.exit(3)
 if defects:
     if mentions_clean:

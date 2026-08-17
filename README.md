@@ -30,8 +30,9 @@ takes ~25 GB), Node.js/npm, [LM Studio](https://lmstudio.ai).
 # Download (skip if `lms ls` already shows it)
 ~/.lmstudio/bin/lms get qwen/qwen3-coder-30b
 
-# Load with a BOUNDED context — do not raise this, see Hard rules
-~/.lmstudio/bin/lms load "qwen/qwen3-coder-30b" --yes --context-length 49152
+# Load with a BOUNDED context — do not raise this, see Hard rules.
+# --parallel 1 matters: the default of 4 multiplies the KV allocation.
+~/.lmstudio/bin/lms load "qwen/qwen3-coder-30b" --yes --context-length 49152 --parallel 1
 
 # Start the OpenAI-compatible API server on :1234
 ~/.lmstudio/bin/lms server start
@@ -156,10 +157,16 @@ The exit status carries the verdict, so a caller never has to parse prose:
 | 3 | the verdict cannot be trusted |
 | 1 / 2 | error / usage |
 
-**Zero tool calls means the model never opened a file**, and that is a 3, not a
-pass. So is an empty response, a half-emitted finding, and a `No findings.`
-with explanatory text trailing it — a clean verdict has to be the whole output,
-not a phrase inside it. Only 0 means clean.
+A 3 covers every way a run can look clean without being one: **no tool call
+succeeded** (a tool that merely *started* proves nothing), the message carrying
+the verdict **did not finish** — truncated, aborted or errored — an empty
+response, a half-emitted finding, or a `No findings.` with explanatory text
+trailing it. A clean verdict has to be the whole output, not a phrase inside
+it. Only 0 means clean.
+
+Only assistant messages are read as verdicts: tool results arrive as their own
+messages carrying whole file contents, and parsing those would let a source
+file be returned as the review.
 
 ### The intent frame, and what it costs
 
@@ -180,6 +187,7 @@ someone else's stated intent.
 | File | What it is |
 |---|---|
 | `scripts/review.sh` | **The entry point.** Preconditions, model load/unload, prompt assembly, and the run audit |
+| `tests/test_local_review_audit.sh` | 60+ assertions over the audit, the model lock, and argument validation. The code under test is extracted from `review.sh` at run time, so the tests cannot pass against a stale copy. Run with `bash tests/test_local_review_audit.sh`. Two drift checks report `SKIP` unless you also have the private repo checked out and point `LOCAL_REVIEW_MIRROR` at it — they compare this copy against its counterpart, which a standalone clone has nothing to compare to. `skipped=` in the footer is the count |
 | `skill/SKILL.md` | The Claude Code skill — invocation, the intent caveat, hard limits |
 | `models.example.json` | pi provider config for LM Studio (:1234) and llama-server (:8080) |
 | `scripts/llama_server.sh` | Fallback engine: serves a Qwen3-Coder GGUF via llama-server on :8080 — ~25% slower than MLX, zero crashes observed |
