@@ -219,13 +219,29 @@ audit_is "tool output is not a verdict"   3 3 ''
 missing=$(/usr/bin/python3 - "$SCRIPT" <<'PY'
 import re, sys
 src = open(sys.argv[1]).read()
-prompt = src[src.index('PROMPT="${OPENING}'):src.index('# --- run ---')]
+# The whole prompt section, not just the PROMPT= literal: OPENING and METHOD
+# are assembled above it, and a placeholder introduced there must be caught too.
+prompt = src[src.index('# --- prompt ---'):src.index('# --- run ---')]
 emitted = set(re.findall(r"<[^<>\n]+>", prompt))
 rejected = set(re.findall(r'"(<[^"]+>)"', src[src.index("PLACEHOLDERS = {"):]))
 print(" ".join(sorted(e for e in emitted if e.lower() not in {r.lower() for r in rejected})))
 PY
 )
 [ -z "$missing" ] && ok || bad "prompt placeholders missing from the rejection set: $missing"
+
+# --- the v7 Method line is pinned ---------------------------------------------
+# CLAUDE.md/README call both halves load-bearing: the purpose-first framing is
+# the measured recall, and the "spend your output on the verdict" clause is
+# what keeps the analysis out of the thinking channel (its removal produced
+# no-verdict runs). The --intent path must NOT carry the method (unbenched,
+# and the two definitions of correct conflict) -- pinned via the empty
+# assignment in that branch.
+grep -q "first determine that function's purpose" "$SCRIPT" \
+  && ok || bad "the v7 Method line lost its purpose-first half"
+grep -q "spend your output on the verdict" "$SCRIPT" \
+  && ok || bad "the v7 Method line lost its brevity/verdict half"
+grep -q '^  METHOD=""$' "$SCRIPT" \
+  && ok || bad "the --intent branch no longer empties METHOD (unbenched combination)"
 
 # --- argument validation -----------------------------------------------------
 # These run before any precondition, so they need neither a model nor a server.

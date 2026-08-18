@@ -1,0 +1,23 @@
+diff --git a/parser.py b/parser.py
+index 6e4e38e..d971567 100644
+--- a/parser.py
++++ b/parser.py
+@@ -12,14 +12,11 @@ def parse_config(text):
+         line = raw.strip()
+         if not line or line.startswith("#"):
+             continue
+-        if "=" not in line:
++        # partition() gives us the separator check for free.
++        key, sep, value = line.partition("=")
++        if not sep:
+             raise ValueError(f"line {lineno}: expected KEY=VALUE, got {raw!r}")
+-        key, _, value = line.partition("=")
+-        key = key.strip()
+-        value = value.strip()
+-        if not key:
+-            raise ValueError(f"line {lineno}: empty key")
+-        result[key] = value
++        result[key.strip()] = value.strip()
+     return result
+ 
+ 

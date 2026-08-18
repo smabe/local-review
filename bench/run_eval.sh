@@ -13,7 +13,20 @@ REPO="$EVAL_DIR/eval-repo"
 RESULTS="$EVAL_DIR/results.tsv"
 TIMEOUT="${LOCAL_REVIEW_EVAL_TIMEOUT:-900}"
 PROVIDER="$1"; MODEL="$2"; RUNS="${3:-1}"; LABEL="${4:?label required}"
-CASES="offbyone swallow boolean leak clean"
+# Overridable so an arm can run its own case list and flags without editing
+# this file (e.g. LOCAL_REVIEW_EVAL_CASES="removedguard"
+# LOCAL_REVIEW_EVAL_ARGS="--rounds 5"). ARGS is word-split on purpose, which
+# means SINGLE-WORD flags only -- a multi-word --intent sentence cannot
+# survive the split; run review.sh by hand for that.
+CASES="${LOCAL_REVIEW_EVAL_CASES:-offbyone swallow boolean leak clean}"
+EXTRA_ARGS="${LOCAL_REVIEW_EVAL_ARGS:-}"
+# Fail closed on a bad case name. Without this, a typo'd case leaves the
+# eval repo unpatched and the run reviews a clean tree: exit 0, recorded as
+# a miss that no log distinguishes from a real one.
+for c in $CASES; do
+  [ -f "$EVAL_DIR/cases/$c/meta" ] \
+    || { echo "run_eval.sh: unknown case '$c' (no cases/$c/meta)" >&2; exit 2; }
+done
 
 mkdir -p "$EVAL_DIR/logs"
 if [ ! -d "$REPO/.git" ]; then
@@ -41,7 +54,7 @@ for run in $(seq 1 "$RUNS"); do
 
     log="$EVAL_DIR/logs/$LABEL-$c-r$run.txt"
     t0=$(date +%s)
-    ( cd "$REPO" && bash "$REVIEW" --provider "$PROVIDER" --model "$MODEL" ) \
+    ( cd "$REPO" && bash "$REVIEW" --provider "$PROVIDER" --model "$MODEL" $EXTRA_ARGS ) \
       > "$log" 2> "$log.err" &
     wpid=$!
     # Watchdog: TERM only this run's pi (review.sh defers its TERM trap while

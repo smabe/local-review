@@ -148,6 +148,18 @@ The two rules doing the work: **quote the exact offending line verbatim or
 the defect does not exist**, and **prose and documentation cannot contain a
 defect**. Drop either and the fabrications come back.
 
+The user prompt adds the **purpose-anchored method** (v7, measured
+2026-08-18, `docs/evict-gap.md`): before judging a changed function's lines,
+the reviewer first determines what that function is supposed to do, then
+judges the lines against that purpose — silently, with its output spent on
+the verdict. On an 18KB fixture this turned an inverted-comparator bug from
+a 1-in-10 catch into 2-in-5 and lifted mean catches from ~3.3 to ~3.8 of 5,
+with clean diffs still at zero findings across every run. Both halves of the
+method line are load-bearing: the purpose-first framing is the recall, and
+the "silently / spend output on the verdict" clause is what keeps the
+analysis out of the thinking channel — an earlier phrasing that asked for
+written notes hit the generation cap and produced no verdict at all.
+
 Findings come back structured — `FILE: path/to/file.py:LINE | confidence`, `QUOTE:`,
 `DEFECT:`, `FAILURE:` — which is what lets the script count them.
 

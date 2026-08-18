@@ -88,6 +88,16 @@ The two rules doing the work are "quote the exact offending line verbatim or
 the defect does not exist" and "prose and documentation cannot contain a
 defect". Removing either brings the fabrications back.
 
+The user prompt adds the purpose-anchored method (v7, measured 2026-08-18 —
+docs/evict-gap.md in the repo): determine each changed function's purpose
+first, then judge its lines against that purpose, silently. Measured effect:
+an inverted-comparator bug went from 1/10 to 2/5 catches on the 18KB fixture,
+mean catches ~3.3 → ~3.8 of 5, clean diffs still zero findings in every run.
+Both halves of the line are load-bearing — the purpose-first framing carries
+the recall, and the brevity/"spend output on the verdict" clause prevents the
+analysis flooding the thinking channel until the generation cap kills the
+verdict (measured failure of an earlier phrasing).
+
 ## The intent frame, and what it costs
 
 When the diff's intent is known — it usually is, since the session invoking

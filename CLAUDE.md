@@ -112,6 +112,11 @@ list and the evidence.
 - **Keep system-prompt rules 1 and 2** — quote the offending line verbatim, and
   prose/docs cannot contain a defect. Dropping either brings the fabrications
   back (measured, 3 runs per arm).
+- **Keep both halves of the user prompt's Method line** (purpose-anchored
+  review, v7). The purpose-first framing is measured recall (docs/evict-gap.md);
+  the "silently … spend your output on the verdict" clause is what stops the
+  analysis flooding the thinking channel until the generation cap eats the
+  verdict — a phrasing without it produced no-verdict runs.
 - **`--exclude-tools edit,write` is advisory.** pi has no OS-enforced sandbox and
   its bash tool can still write. For untrusted diffs use
   `codex exec --sandbox read-only`.

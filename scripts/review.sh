@@ -268,13 +268,29 @@ DEFECT: `=+` reassigns total to +amount instead of adding to it.
 FAILURE: Summing [5, 5] returns 5, not 10.
 When there are no defects your entire message is exactly: No findings.'
 
+# The purpose-anchored method (prompt v7, measured 2026-08-18 -- see
+# docs/evict-gap.md). A shape change, not a category list: deriving each
+# function's purpose first is what turned the fixture's inverted-comparator
+# bug from a 1/10 catch into 2/5, at zero cost to precision (clean diffs
+# stayed at 0 findings across every run). The closing brevity clause is
+# load-bearing: an earlier phrasing that asked for WRITTEN purpose notes
+# pushed the whole analysis into the thinking channel and hit the generation
+# cap before any verdict was emitted. Do not drop either half. METHOD begins
+# with its own newline; the bare OPENING/METHOD concat below depends on it.
+# On the --intent path METHOD is empty: the intent frame ("implements
+# the intent = correct by definition") and the purpose method ("contradicts
+# its function's purpose = defect") are two competing definitions of correct,
+# and the combination has never been benched.
 if [ -n "$INTENT" ]; then
   OPENING="Review the uncommitted changes in this repository for correctness bugs, judging every change AGAINST THIS INTENT: ${INTENT} A change that implements the stated intent is correct by definition; do not report it. Report only defects that contradict the intent or are unrelated to it."
+  METHOD=""
 else
   OPENING="Review the uncommitted changes in this repository for correctness bugs."
+  METHOD="
+Method: as you read each changed function, first determine that function's purpose — what it is supposed to do, judged from its name, docstring, comments, and callers — and only then judge its added or edited lines against that purpose. A line that contradicts its own function's purpose is a defect, even when the line looks correct on its own. Do this silently while reading; keep any deliberation brief, and spend your output on the verdict itself."
 fi
 
-PROMPT="${OPENING}
+PROMPT="${OPENING}${METHOD}
 HARD BUDGET: at most ${ROUNDS} rounds of tool calls, then give your verdict — batch commands (round 1: git status --short && ${DIFF_CMD}; round 2: read the changed files).
 Untracked files do not appear in ${DIFF_CMD}: enumerate them with git ls-files --others --exclude-standard and read them directly. Do not run git add.
 Report each defect in exactly this form, most severe first:
