@@ -1,0 +1,19 @@
+FILE: serialize.py:37 | confidence: high
+QUOTE: `        _migrate_v1(payload["data"])`
+DEFECT: The migration's return value is discarded; the next line returns `dict(payload["data"])`, the un-migrated original, so v1 records are returned unchanged.
+FAILURE: `from_wire('{"v": 1, "data": {"tags": ["a"]}}')` returns `{"tags": ["a"]}` instead of `{"labels": ["a"], "meta": {}}` — no rename, no defaults.
+
+FILE: cli.py:124 | confidence: high
+QUOTE: `COMMANDS["import"] = cmd_import`
+DEFECT: This registration sits below the `if __name__ == "__main__": sys.exit(main(sys.argv))` block at line 91, so when the file is run as a script the process exits inside `main` before the module body reaches this line; `"import"` is never in `COMMANDS`.
+FAILURE: `python cli.py import dump.txt` prints `unknown command: import` and returns 2.
+
+FILE: cache.py:41 | confidence: high
+QUOTE: `            victim = max(self._entries, key=lambda k: self._entries[k].ts)`
+DEFECT: `max` on the timestamp selects the most recently inserted entry as the eviction victim; the oldest entry requires `min`.
+FAILURE: With `max_entries=2`, inserting keys A, B, then C evicts B (just cached) and keeps A, so a full cache degenerates to one stable slot plus a thrashing slot — every subsequent new key evicts itself's predecessor while stale A never leaves.
+
+FILE: cli.py:60 | confidence: high
+QUOTE: `        return 0`
+DEFECT: The `OSError` handler for a failed export returns success (0) after printing the error, so a partial or unwritten export is reported as a successful run.
+FAILURE: `cli.py export /nonexistent-dir/out.txt` prints `export failed: ...` to stderr but exits 0, so a shell script guarding on `if cli.py export ...` proceeds as though the dump was written.

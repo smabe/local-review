@@ -1,0 +1,19 @@
+FILE: serialize.py:37 | confidence: high
+QUOTE: `        _migrate_v1(payload["data"])`
+DEFECT: The migration's return value is discarded, and `_migrate_v1` copies its input (`migrated = dict(data)`) rather than mutating it, so the next line returns the untouched v1 dict.
+FAILURE: `from_wire('{"v": 1, "data": {"tags": ["a"]}}')` returns `{"tags": ["a"]}` instead of `{"labels": ["a"], "meta": {}}` — the v1 payload is never lifted to the v2 shape.
+
+FILE: cli.py:60 | confidence: high
+QUOTE: `        return 0`
+DEFECT: The `OSError` handler for a failed export returns the success status 0, so a write failure is indistinguishable from a completed export.
+FAILURE: `cli.py export /read-only/dump.jsonl` prints "export failed: ..." and exits 0; a backup script that keys off the exit status treats the missing or partial dump as a successful export.
+
+FILE: cli.py:124 | confidence: high
+QUOTE: `COMMANDS["import"] = cmd_import`
+DEFECT: This registration sits after the `if __name__ == "__main__": sys.exit(main(sys.argv))` block at line 90-91, so `SystemExit` is raised before the module body reaches it; the dispatch table `main` consults never contains "import".
+FAILURE: `python cli.py import dump.jsonl` prints "unknown command: import" and exits 2, even though `cmd_import` is defined.
+
+FILE: cache.py:41 | confidence: high
+QUOTE: `            victim = max(self._entries, key=lambda k: self._entries[k].ts)`
+DEFECT: `max` on the timestamp selects the newest entry as the eviction victim; a bounded TTL cache must evict the oldest, which is `min`.
+FAILURE: With `max_entries=2`, caching keys A, B, then C evicts B (just written) and leaves A and C; every subsequent new key evicts the one before it, so the oldest entry A is pinned forever and the cache degrades to a single rotating slot.

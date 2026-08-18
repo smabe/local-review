@@ -18,3 +18,24 @@ Results (default settings, two runs per model; verdicts in `*-r*.txt`):
 - `qwen3coder-gguf`: exit 0 both runs, ~20 s — "No findings." A false
   clean at exactly the scale where review matters; this is why it lost the
   default despite the speed.
+
+## Frontier baseline (2026-08-18, added during the context-tier bench)
+
+Four Claude agents, same system prompt, same user prompt including the 3-round
+budget, same 18349-byte diff, no knowledge that the fixture is seeded. Verdicts
+in `frontier-r1.txt` … `frontier-r4.txt` (a fifth run ignored its working
+directory and reviewed the harness instead; discarded — the method has a
+compliance failure mode a hermetic harness does not).
+
+All four runs: **4/5 known bugs, zero unmatched findings, ~50 s.** All caught
+the cache eviction; all missed the default-namespace export.
+
+Why this was run: the cache eviction (`max(...ts)` evicts the NEWEST entry) had
+been missed on nearly every local run on record, and there was no way to tell
+whether it was a prompt problem or a bug too hard to catch under this contract.
+It is catchable — so the gap was real headroom, not a ceiling. (An earlier
+"local is not a strict subset of frontier" reading of the export-bug split was
+RETRACTED the same day: local 2-of-many vs frontier 0/4 is not distinguishable
+from noise.) The headroom was then partly claimed: prompt v7's purpose-anchored
+method (docs/evict-gap.md) lifted the cache-eviction catch to 2/5 with the
+reliable trio intact and zero fabrications.

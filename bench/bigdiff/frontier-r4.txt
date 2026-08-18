@@ -1,0 +1,19 @@
+FILE: serialize.py:37 | confidence: high
+QUOTE: `        _migrate_v1(payload["data"])`
+DEFECT: The migrated dict returned by `_migrate_v1` is discarded; line 38 returns a copy of the original unmigrated `payload["data"]`, so v1 records are never lifted to the v2 shape.
+FAILURE: `from_wire('{"v": 1, "data": {"tags": ["a"]}}')` returns `{"tags": ["a"]}` instead of `{"labels": ["a"], "meta": {}}`.
+
+FILE: cli.py:124 | confidence: high
+QUOTE: `COMMANDS["import"] = cmd_import`
+DEFECT: `cmd_import` is defined and registered after the `if __name__ == "__main__": sys.exit(main(sys.argv))` block at line 90-91, so when run as a script `main` executes before "import" is ever added to `COMMANDS`.
+FAILURE: `python cli.py import dump.txt` prints `unknown command: import` and exits 2; the file is never loaded.
+
+FILE: cache.py:41 | confidence: high
+QUOTE: `            victim = max(self._entries, key=lambda k: self._entries[k].ts)`
+DEFECT: `max` on the timestamp selects the newest entry as the eviction victim; the oldest entry (`min`) is what should be dropped when the cache is full.
+FAILURE: With `max_entries=2`, after caching "a" then "b", inserting "c" evicts "b" (just inserted) and keeps the stale "a"; a hot key inserted immediately before the cap is hit is discarded on every subsequent insert, so the cache never retains recent entries.
+
+FILE: cli.py:60 | confidence: high
+QUOTE: `        return 0`
+DEFECT: The `OSError` handler in `cmd_export` returns 0, the success status, after printing a failure message, so a failed export reports success to the shell.
+FAILURE: `cli.py export /nonexistent-dir/out.txt` prints "export failed: ..." but exits 0, so a script doing `cli.py export out.txt && rm -rf data/` proceeds to delete the source with no backup written.

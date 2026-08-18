@@ -112,12 +112,11 @@ opening line and inherits every error in the intent's source.
 
 ## The settings
 
-Context is 49152 with `--parallel 1` everywhere — the size every accuracy
-number was measured at. The historical 96K kernel panic (~35 GB wired) was
-MLX/LM Studio-specific; on llama-server with Qwen3.8 a monitored ramp
-(2026-08-18) measured 96K at 31.5 GB wired peak with clean teardown, so
-higher context is a documented opt-in (`LLAMA_CTX`), unmeasured for
-accuracy, with full-window prefill running ~8 minutes. Output caps at 8192 tokens (12000 for
+Context is 49152 with `--parallel 1` everywhere. **Accuracy across context
+tiers has now been measured, and it is flat** — see "Context tiers" below.
+The historical 96K kernel panic (~35 GB wired) was MLX/LM Studio-specific;
+on llama-server with Qwen3.8 higher context is a safe opt-in (`LLAMA_CTX`),
+it is simply not a useful one for this workload. Output caps at 8192 tokens (12000 for
 thinking arms). Per-model sampling lives in `~/.pi/agent/models.json`
 (template: `models.example.json`); pi merges `samplingParams` verbatim into
 every request body, which is how request-level engine knobs are reachable
@@ -151,3 +150,66 @@ is small (2 runs per case), so single-run deltas are noise and only
 patterns that repeated across versions were acted on; and the frontier
 baseline (fresh Claude agents, identical contract) marks the ceiling: the
 remaining local gap is analysis depth, not detection or format.
+
+## Context tiers — measured 2026-08-18, and the answer is "it does not matter"
+
+Three arms at 49152 / 65536 / 98304, each running the five small cases twice
+and the 18.3 KB big diff twice, with `LLAMA_CTX` and pi's `contextWindow`
+raised together per arm (raising one without the other either wastes the room
+or lets pi overrun the server). Driver: `bench/run_ctx_tiers.sh`.
+
+| ctx | small cases | clean diff | big diff hits | median s | peak wired |
+|---|---|---|---|---|---|
+| 49152 | 7/8 | passed | 3, 3 | 140 | 31.5 GB |
+| 65536 | 7/8 | passed | 3, 4 | 115 | 32.0 GB |
+| 98304 | 7/8 | passed | 4, 3 | 110 | 32.6 GB |
+
+Identical detection at every tier, zero fabrications, and no untrusted verdict
+or timeout anywhere in 36 runs. Latency and memory differences are inside the
+noise — the same case ranged 45–585 s *within* single arms.
+
+**The mechanism, which matters more than the table.** Every big-diff run peaked
+between 13.9K and 16.6K total tokens. That is roughly a third of the *smallest*
+window tested. The workload never comes close to filling 49152, so there is no
+mechanism by which a larger window could change an answer, and the flat result
+is what the token counts predict rather than a surprise. Anyone tempted to
+raise `LLAMA_CTX` for quality should check the "N tokens peak" figure in the
+audit's stderr line first; raise it only when that number approaches the window.
+
+Two single-run results inside these arms are worth naming precisely so they are
+not mistaken for findings. The 98304 arm produced what was, at the time, the
+only local catch of the cache-eviction bug ever recorded (verified by hand:
+correct line, correct reasoning — the v7 prompt work later that day made the
+catch repeatable; see "The frontier gap, located" below), and the 65536 arm
+produced one of the first local catches of the default-namespace export bug. Neither repeated in its own arm's second run, and
+both runs peaked at the same ~15K tokens as every other run. At n=2 per arm
+these are variance on bugs sitting at the edge of the model's reach, not tier
+effects.
+
+**Decision: keep 49152.** Raising it is safe and costs nothing measurable, but
+it also buys nothing measurable. Untested: a diff large enough to actually fill
+the window — this fixture is 18.3 KB, and that question is a different
+experiment.
+
+## The frontier gap, located
+
+Also measured 2026-08-18: the frontier baseline was run on the big diff for the
+first time (four Claude agents, verbatim system and user prompts, same diff,
+verdicts in `bench/bigdiff/frontier-r*.txt`). All four scored 4/5 with zero
+unmatched findings, in ~50 s.
+
+The one bug they all caught and the local model almost never did is the cache
+eviction (`victim = max(...ts)` evicts the NEWEST entry). Local under the v6
+prompt caught it once in eight runs (the six context-tier rows plus the two
+rounds-probe rows; the ~3.3 mean-hits figure below is the six tier rows alone,
+27/8 ≈ 3.4 over all eight); frontier caught it 4 for 4. **That gap was
+real headroom, not a capability ceiling** — which is the question the baseline
+was run to settle, and the prompt work it justified then landed: v7's
+purpose-anchored method (shipped 2026-08-18, docs/evict-gap.md) lifted the
+catch to 2/5 with the reliable trio intact, mean hits ~3.3 → ~3.8, and clean
+diffs still at zero findings.
+
+Nothing else about relative strengths on this fixture is currently supported.
+The default-namespace export bug is caught by local 2 of 8 and frontier 0 of 4,
+which is not a distinguishable difference at this n, and reading it as one is a
+mistake this bench has already invited more than once.

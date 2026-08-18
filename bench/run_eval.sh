@@ -61,6 +61,11 @@ for run in $(seq 1 "$RUNS"); do
     # pi runs), give review.sh's cleanup a generous grace, then TERM the run.
     # Never a machine-wide pkill, never a KILL that could orphan the lock.
     ( sleep "$TIMEOUT"
+      # Marker first: rc=124 keys on the watchdog firing, not wall clock --
+      # date +%s advances across suspend while sleep does not, so elapsed
+      # seconds alone would rewrite a genuine verdict into a timeout (and
+      # found=1 into found=0) after any lid-close.
+      : > "$log.timeout"
       # TERM the deepest descendant first: pi is a node script (process name
       # "node", never "pi"), and review.sh defers its own TERM trap while its
       # foreground child runs -- so the generation process itself must die
@@ -78,7 +83,7 @@ for run in $(seq 1 "$RUNS"); do
     wait "$wpid"; rc=$?
     kill "$killer" 2>/dev/null; wait "$killer" 2>/dev/null
     secs=$(( $(date +%s) - t0 ))
-    if [ "$secs" -ge "$TIMEOUT" ]; then rc=124; fi
+    if [ -f "$log.timeout" ]; then rc=124; rm -f "$log.timeout"; fi
 
     nfind=$(sed -n 's/.*audit: .*ok, \([0-9][0-9]*\) defect(s).*/\1/p' "$log.err" | tail -1)
     [ -n "$nfind" ] || nfind=0

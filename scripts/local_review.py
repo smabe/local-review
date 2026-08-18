@@ -7,8 +7,8 @@ Usage:
   scripts/local_review.py main...my-branch
 
 Streams the model's review to stdout. This is an EXPERIMENT alongside the
-canonical gates — it does not stamp the code-review-gate hook; /auto-review
-or /code-review still owns the commit gate.
+canonical gates — it does not stamp the code-review-gate hook; the project's
+own code-review path still owns the commit gate.
 """
 
 import json
