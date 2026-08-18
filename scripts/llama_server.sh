@@ -4,29 +4,47 @@
 # see lmstudio-ai/mlx-engine#264).
 #
 # Usage: scripts/llama_server.sh [path-to-gguf] [extra llama-server flags...]
-# Default model: first Qwen3-Coder GGUF found under ~/.lmstudio/models or ~/models.
-# Extra flags go straight to llama-server -- e.g. the measured accuracy pick:
-#   scripts/llama_server.sh ~/models/Qwen3.8-27B-Q6_K.gguf \
-#     --reasoning-format deepseek --reasoning-budget 0
+# Default model: the first Qwen3.8 GGUF found under ~/models or
+# ~/.lmstudio/models (the measured default reviewer) -- no silent fallback to
+# another model. A Qwen3.8 is served thinking-off with f16 KV, exactly the
+# measured arm; any explicitly passed model gets q8_0 KV like the other
+# measured arms. Pass a path plus your own flags to serve anything else.
 set -euo pipefail
 
 MODEL="${1:-}"
 if [[ "$MODEL" == -* ]]; then MODEL=""; else if [[ $# -gt 0 ]]; then shift; fi; fi
 if [[ -z "$MODEL" ]]; then
-  MODEL=$(find ~/.lmstudio/models ~/models -iname "*qwen3-coder*.gguf" ! -iname "*mmproj*" 2>/dev/null | head -1 || true)
+  MODEL=$(find ~/models ~/.lmstudio/models -iname "*qwen3.8*.gguf" ! -iname "*mmproj*" 2>/dev/null | head -1 || true)
+  # No silent substitute: serving a different model under the default alias
+  # would masquerade as the measured reviewer end to end. Another model is
+  # always one explicit path away.
+  [[ -n "$MODEL" ]] || { echo "No Qwen3.8 GGUF found under ~/models or ~/.lmstudio/models — download it (see README step 1) or pass a path: scripts/llama_server.sh <model.gguf>" >&2; exit 1; }
 fi
-[[ -n "$MODEL" && -f "$MODEL" ]] || { echo "No GGUF found — pass a path: scripts/llama_server.sh <model.gguf>" >&2; exit 1; }
+[[ -f "$MODEL" ]] || { echo "Not a file: $MODEL" >&2; exit 1; }
+
+# Match the measured arms exactly: Qwen3.8 runs thinking-off with f16 KV (its
+# hybrid cache is small); anything else gets the q8_0 KV the other arms used.
+# Case-insensitive on the filename -- quantizers vary the casing.
+REASONING_FLAGS=()
+CACHE_FLAGS=(--cache-type-k q8_0 --cache-type-v q8_0)
+case "$(basename "$MODEL" | tr '[:upper:]' '[:lower:]')" in
+  *qwen3.8*)
+    REASONING_FLAGS=(--reasoning-format deepseek --reasoning-budget 0)
+    CACHE_FLAGS=()
+    ;;
+esac
 
 echo "Serving: $MODEL"
 exec llama-server \
   -m "$MODEL" \
-  --alias local-reviewer \
+  --alias "${LLAMA_ALIAS:-qwen38-gguf-nothink}" \
   --port 8080 \
   --jinja \
   --ctx-size 49152 \
   --parallel 1 \
-  --cache-type-k q8_0 \
   --flash-attn on \
+  ${CACHE_FLAGS[@]+"${CACHE_FLAGS[@]}"} \
+  ${REASONING_FLAGS[@]+"${REASONING_FLAGS[@]}"} \
   "$@"
 # --jinja: required for Qwen3-Coder's chat template + tool-call parsing.
 # --ctx-size: bounded on purpose — huge contexts are what blow up KV memory.

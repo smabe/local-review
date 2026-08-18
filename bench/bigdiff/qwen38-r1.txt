@@ -1,0 +1,19 @@
+FILE: serialize.py:37 | confidence: high
+QUOTE:         _migrate_v1(payload["data"])
+DEFECT: The return value of `_migrate_v1` is discarded. `_migrate_v1` builds and returns a *new* dict (`migrated = dict(data)`), so `payload["data"]` is never modified, and the next line returns the un-migrated v1 data.
+FAILURE: `from_wire('{"v": 1, "data": {"key": "a", "tags": ["x"]}}')` returns `{"key": "a", "tags": ["x"]}` instead of the documented v2 shape `{"key": "a", "labels": ["x"], "meta": {}}` — "tags" is not renamed to "labels" and "meta" is not added.
+
+FILE: cli.py:124 | confidence: high
+QUOTE: COMMANDS["import"] = cmd_import
+DEFECT: This registration sits after the `if __name__ == "__main__": sys.exit(main(sys.argv))` block (line 90). When the file is run as a script, `main()` executes and terminates the process before line 124 ever runs, so "import" is never in `COMMANDS` and `cmd_import` is unreachable dead code.
+FAILURE: `python cli.py import dump.json` prints `unknown command: import` and exits 2 instead of importing the file.
+
+FILE: cli.py:60 | confidence: medium
+QUOTE:         return 0
+DEFECT: In `cmd_export`'s `except OSError` handler, the function returns exit code 0 after printing "export failed", reporting success to the caller; the analogous `cmd_import` handler returns 1 for the same class of failure.
+FAILURE: `python cli.py export /nonexistent-dir/out.json` prints "export failed: ..." yet exits 0, so scripts and CI treating the exit code as status cannot detect the failed export.
+
+FILE: cli.py:55 | confidence: medium
+QUOTE:             for key in store.keys():
+DEFECT: `store.keys()` defaults to `namespace="default"`, so `cmd_export` only writes records from the default namespace, silently omitting every record stored under any other namespace despite the function's contract ("Write every record to a file").
+FAILURE: A store containing `set("k", "v", namespace="audit")` plus default-namespace keys: the export file contains only the default-namespace records; the "audit" record is silently dropped.

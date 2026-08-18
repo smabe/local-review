@@ -1,0 +1,608 @@
+diff --git a/cache.py b/cache.py
+index 03824fd..d57def2 100644
+--- a/cache.py
++++ b/cache.py
+@@ -1,33 +1,87 @@
+-"""In-memory TTL cache in front of a Store."""
++"""Bounded in-memory TTL cache in front of a Store, with hit statistics."""
+ import time
+ 
+ 
+ class CacheEntry:
++    __slots__ = ("value", "ts")
++
+     def __init__(self, value, ts):
+         self.value = value
+         self.ts = ts
+ 
+ 
+ class TTLCache:
+-    def __init__(self, store, ttl_seconds=60):
++    def __init__(self, store, ttl_seconds=60, max_entries=1024):
+         self.store = store
+         self.ttl = ttl_seconds
++        self.max_entries = max_entries
++        self.hits = 0
++        self.misses = 0
+         self._entries = {}
+ 
+     def get(self, key):
+         entry = self._entries.get(key)
+         if entry is not None:
+             if time.time() - entry.ts <= self.ttl:
++                self.hits += 1
+                 return entry.value
+             del self._entries[key]
++        self.misses += 1
+         value = self.store.get(key)
+         if value is not None:
+-            self._entries[key] = CacheEntry(value, time.time())
++            self._remember(key, value)
+         return value
+ 
+     def put(self, key, value):
+         self.store.set(key, value)
++        self._remember(key, value)
++
++    def _remember(self, key, value):
++        if key not in self._entries and len(self._entries) >= self.max_entries:
++            victim = max(self._entries, key=lambda k: self._entries[k].ts)
++            del self._entries[victim]
+         self._entries[key] = CacheEntry(value, time.time())
+ 
+     def invalidate(self, key):
+         self._entries.pop(key, None)
++
++    def stats(self):
++        total = self.hits + self.misses
++        rate = self.hits / total if total else 0.0
++        return {"hits": self.hits, "misses": self.misses, "hit_rate": rate}
++
++
++class NullCache:
++    """Drop-in stand-in that never caches; useful to bisect cache suspicion.
++
++    Keeps the TTLCache interface so callers can swap it in via configuration
++    without touching call sites: get() always consults the store, put()
++    writes through, invalidate() and stats() are inert.
++    """
++
++    def __init__(self, store):
++        self.store = store
++        self.hits = 0
++        self.misses = 0
++
++    def get(self, key):
++        self.misses += 1
++        return self.store.get(key)
++
++    def put(self, key, value):
++        self.store.set(key, value)
++
++    def invalidate(self, key):
++        pass
++
++    def stats(self):
++        return {"hits": 0, "misses": self.misses, "hit_rate": 0.0}
++
++
++def make_cache(store, settings):
++    """Build the configured cache flavor from parsed settings."""
++    if settings.get("cache.disabled", "").strip().lower() in {"1", "true", "yes"}:
++        return NullCache(store)
++    ttl = int(settings.get("cache.ttl_seconds", "60"))
++    cap = int(settings.get("cache.max_entries", "1024"))
++    return TTLCache(store, ttl_seconds=ttl, max_entries=cap)
+diff --git a/cli.py b/cli.py
+index 4a28f34..fd27106 100644
+--- a/cli.py
++++ b/cli.py
+@@ -1,7 +1,9 @@
+-"""Command-line front end: get/set/delete/export against a store."""
++"""Command-line front end: get/set/delete/keys/export against a store."""
++import json
+ import sys
+ 
+ from parser import parse_config
++from serialize import to_wire
+ from store import Store
+ 
+ 
+@@ -13,28 +15,110 @@ def load_settings(path):
+         return {}
+ 
+ 
++def cmd_get(store, args):
++    if len(args) != 1:
++        return usage()
++    value = store.get(args[0])
++    if value is None:
++        return 1
++    print(value)
++    return 0
++
++
++def cmd_set(store, args):
++    if len(args) != 2:
++        return usage()
++    store.set(args[0], args[1])
++    return 0
++
++
++def cmd_delete(store, args):
++    if len(args) != 1:
++        return usage()
++    store.delete(args[0])
++    return 0
++
++
++def cmd_keys(store, args):
++    namespace = args[0] if args else "default"
++    for key in sorted(store.keys(namespace=namespace)):
++        print(key)
++    return 0
++
++
++def cmd_export(store, args):
++    """Write every record to a file as wire-format lines."""
++    if len(args) != 1:
++        return usage()
++    try:
++        with open(args[0], "w") as fh:
++            for key in store.keys():
++                record = {"key": key, "value": store.get(key)}
++                fh.write(to_wire(record) + "\n")
++    except OSError as exc:
++        print(f"export failed: {exc}", file=sys.stderr)
++        return 0
++    return 0
++
++
++COMMANDS = {
++    "get": cmd_get,
++    "set": cmd_set,
++    "delete": cmd_delete,
++    "keys": cmd_keys,
++    "export": cmd_export,
++}
++
++
++def usage():
++    print("usage: cli.py <get|set|delete|keys|export> ...", file=sys.stderr)
++    return 2
++
++
+ def main(argv):
+     if len(argv) < 2:
+-        print("usage: cli.py <get|set|delete> ...", file=sys.stderr)
+-        return 2
++        return usage()
+     settings = load_settings("app.conf")
+-    store = Store(settings.get("store_path", "store.json"))
+-    cmd = argv[1]
+-    if cmd == "get" and len(argv) == 3:
+-        value = store.get(argv[2])
+-        if value is None:
+-            return 1
+-        print(value)
+-        return 0
+-    if cmd == "set" and len(argv) == 4:
+-        store.set(argv[2], argv[3])
+-        return 0
+-    if cmd == "delete" and len(argv) == 3:
+-        store.delete(argv[2])
+-        return 0
+-    print(f"unknown command: {cmd}", file=sys.stderr)
+-    return 2
++    store = Store(settings.get("app.store_path", settings.get("store_path", "store.json")))
++    handler = COMMANDS.get(argv[1])
++    if handler is None:
++        print(f"unknown command: {argv[1]}", file=sys.stderr)
++        return 2
++    return handler(store, argv[2:])
+ 
+ 
+ if __name__ == "__main__":
+     sys.exit(main(sys.argv))
++
++
++def cmd_import(store, args):
++    """Read wire-format lines from a file and load them into the store."""
++    if len(args) != 1:
++        return usage()
++    from serialize import from_wire
++    loaded = 0
++    skipped = 0
++    try:
++        with open(args[0]) as fh:
++            for raw in fh:
++                raw = raw.strip()
++                if not raw:
++                    continue
++                try:
++                    record = from_wire(raw)
++                except ValueError:
++                    skipped += 1
++                    continue
++                if "key" in record and "value" in record:
++                    store.set(record["key"], record["value"])
++                    loaded += 1
++                else:
++                    skipped += 1
++    except OSError as exc:
++        print(f"import failed: {exc}", file=sys.stderr)
++        return 1
++    print(f"loaded {loaded}, skipped {skipped}", file=sys.stderr)
++    return 0
++
++
++COMMANDS["import"] = cmd_import
+diff --git a/journal.py b/journal.py
+new file mode 100644
+index 0000000..2f67b19
+--- /dev/null
++++ b/journal.py
+@@ -0,0 +1,49 @@
++"""Append-only operation journal for auditing store mutations.
++
++Every mutation appends one JSON line: {ts, op, namespace, key}. The journal
++is best-effort by design -- a failed append never blocks the mutation -- but
++failures are counted so callers can surface persistent trouble.
++"""
++import json
++import time
++
++
++class Journal:
++    def __init__(self, path):
++        self.path = path
++        self.failed_appends = 0
++
++    def record(self, op, key, namespace="default"):
++        entry = {
++            "ts": round(time.time(), 3),
++            "op": op,
++            "namespace": namespace,
++            "key": key,
++        }
++        line = json.dumps(entry, sort_keys=True)
++        try:
++            with open(self.path, "a") as fh:
++                fh.write(line + "\n")
++        except OSError:
++            self.failed_appends += 1
++
++    def entries(self):
++        """Yield parsed journal entries, skipping torn trailing lines."""
++        try:
++            fh = open(self.path)
++        except FileNotFoundError:
++            return
++        with fh:
++            for raw in fh:
++                raw = raw.strip()
++                if not raw:
++                    continue
++                try:
++                    yield json.loads(raw)
++                except json.JSONDecodeError:
++                    continue
++
++    def entries_for(self, namespace):
++        for entry in self.entries():
++            if entry.get("namespace") == namespace:
++                yield entry
+diff --git a/parser.py b/parser.py
+index 55d5062..182a331 100644
+--- a/parser.py
++++ b/parser.py
+@@ -1,12 +1,38 @@
+-"""Parse simple KEY=VALUE config lines."""
++"""Parse simple KEY=VALUE config lines, with [sections] and inline comments."""
++
++
++def _strip_inline_comment(line):
++    """Drop an inline comment introduced by ' #' outside of quotes."""
++    in_quote = None
++    for i, ch in enumerate(line):
++        if in_quote:
++            if ch == in_quote:
++                in_quote = None
++            continue
++        if ch in "\"'":
++            in_quote = ch
++        elif ch == "#" and i > 0 and line[i - 1] in " \t":
++            return line[:i].rstrip()
++    return line
+ 
+ 
+ def parse_config(text):
+-    """Return a dict of config values; later duplicates win."""
++    """Return a dict of config values; later duplicates win.
++
++    Lines starting with '#' or ';' are comments. A [section] header prefixes
++    the keys that follow it as 'section.key'. Raises ValueError on malformed
++    lines, naming the line number.
++    """
+     result = {}
++    section = ""
+     for lineno, raw in enumerate(text.splitlines(), 1):
+-        line = raw.strip()
+-        if not line or line.startswith("#"):
++        line = _strip_inline_comment(raw.strip())
++        if not line or line[0] in "#;":
++            continue
++        if line.startswith("[") and line.endswith("]"):
++            section = line[1:-1].strip()
++            if not section:
++                raise ValueError(f"line {lineno}: empty section name")
+             continue
+         if "=" not in line:
+             raise ValueError(f"line {lineno}: expected KEY=VALUE, got {raw!r}")
+@@ -15,7 +41,9 @@ def parse_config(text):
+         value = value.strip()
+         if not key:
+             raise ValueError(f"line {lineno}: empty key")
+-        result[key] = value
++        if value and value[0] == value[-1] and value[0] in "\"'" and len(value) >= 2:
++            value = value[1:-1]
++        result[f"{section}.{key}" if section else key] = value
+     return result
+ 
+ 
+@@ -24,3 +52,29 @@ def merge_defaults(config, defaults):
+     merged = dict(defaults)
+     merged.update(config)
+     return merged
++
++
++TRUTHY = {"1", "true", "yes", "on"}
++FALSY = {"0", "false", "no", "off"}
++
++
++def parse_bool(value, default=False):
++    """Interpret a config string as a boolean; unrecognized -> default."""
++    if value is None:
++        return default
++    v = value.strip().lower()
++    if v in TRUTHY:
++        return True
++    if v in FALSY:
++        return False
++    return default
++
++
++def section(config, name):
++    """Return the keys of one [section] with the prefix stripped."""
++    prefix = name + "."
++    return {
++        key[len(prefix):]: value
++        for key, value in config.items()
++        if key.startswith(prefix)
++    }
+diff --git a/serialize.py b/serialize.py
+index e4fdf38..83ea100 100644
+--- a/serialize.py
++++ b/serialize.py
+@@ -1,19 +1,39 @@
+-"""Record serialization: dict <-> wire format with schema version."""
++"""Record serialization: dict <-> wire format with schema versioning.
++
++v1 records carried a free-form "tags" list; v2 renames it to "labels" and
++adds a "meta" dict. from_wire migrates old payloads forward transparently.
++"""
+ import json
+ 
+-SCHEMA_VERSION = 1
++SCHEMA_VERSION = 2
+ 
+ 
+ def to_wire(record):
+-    """Serialize a record dict to a wire string."""
+-    payload = {"v": SCHEMA_VERSION, "data": dict(record)}
++    """Serialize a record dict to a canonical wire string."""
++    data = dict(record)
++    data.setdefault("labels", [])
++    data.setdefault("meta", {})
++    payload = {"v": SCHEMA_VERSION, "data": data}
+     return json.dumps(payload, sort_keys=True)
+ 
+ 
++def _migrate_v1(data):
++    """Lift a v1 record dict to the v2 shape."""
++    migrated = dict(data)
++    if "tags" in migrated:
++        migrated["labels"] = migrated.pop("tags")
++    migrated.setdefault("labels", [])
++    migrated.setdefault("meta", {})
++    return migrated
++
++
+ def from_wire(text):
+-    """Parse a wire string back to a record dict."""
++    """Parse a wire string to a record dict, migrating old versions forward."""
+     payload = json.loads(text)
+     version = payload.get("v", 0)
+-    if version != SCHEMA_VERSION:
+-        raise ValueError(f"unsupported schema version: {version}")
+-    return dict(payload["data"])
++    if version == SCHEMA_VERSION:
++        return dict(payload["data"])
++    if version == 1:
++        _migrate_v1(payload["data"])
++        return dict(payload["data"])
++    raise ValueError(f"unsupported schema version: {version}")
+diff --git a/store.py b/store.py
+index 40b46a8..b3792ed 100644
+--- a/store.py
++++ b/store.py
+@@ -1,31 +1,58 @@
+-"""Tiny JSON-backed key-value store with atomic writes."""
++"""Namespaced JSON-backed key-value store with atomic writes and batch ops."""
+ import json
+ import os
+ import tempfile
+ 
++SEP = ":"
++
++
++def qualify(namespace, key):
++    """Join a namespace and key into a storage key."""
++    if SEP in namespace:
++        raise ValueError(f"namespace may not contain {SEP!r}: {namespace!r}")
++    return f"{namespace}{SEP}{key}"
++
++
++def split_key(storage_key):
++    """Split a storage key back into (namespace, key)."""
++    namespace, _, key = storage_key.partition(SEP)
++    return namespace, key
++
+ 
+ class Store:
+     def __init__(self, path):
+         self.path = path
+         self._data = {}
++        self._dirty = False
+         if os.path.exists(path):
+             with open(path) as fh:
+                 self._data = json.load(fh)
+ 
+-    def get(self, key, default=None):
+-        return self._data.get(key, default)
++    def get(self, key, default=None, namespace="default"):
++        return self._data.get(qualify(namespace, key), default)
++
++    def set(self, key, value, namespace="default"):
++        self._data[qualify(namespace, key)] = value
++        self._flush()
+ 
+-    def set(self, key, value):
+-        self._data[key] = value
++    def set_many(self, items, namespace="default"):
++        """Write several keys with a single flush."""
++        for key, value in items.items():
++            self._data[qualify(namespace, key)] = value
+         self._flush()
+ 
+-    def delete(self, key):
+-        if key in self._data:
+-            del self._data[key]
++    def delete(self, key, namespace="default"):
++        storage_key = qualify(namespace, key)
++        if storage_key in self._data:
++            del self._data[storage_key]
+             self._flush()
+ 
+-    def keys_with_prefix(self, prefix):
+-        return [k for k in self._data if k.startswith(prefix)]
++    def keys(self, namespace="default"):
++        prefix = namespace + SEP
++        return [split_key(k)[1] for k in self._data if k.startswith(prefix)]
++
++    def namespaces(self):
++        return sorted({split_key(k)[0] for k in self._data})
+ 
+     def _flush(self):
+         fd, tmp = tempfile.mkstemp(dir=os.path.dirname(self.path) or ".")
+@@ -37,3 +64,31 @@ class Store:
+             if os.path.exists(tmp):
+                 os.unlink(tmp)
+             raise
++
++    def count(self, namespace="default"):
++        prefix = namespace + SEP
++        return sum(1 for k in self._data if k.startswith(prefix))
++
++    def rename_namespace(self, old, new):
++        """Move every key from one namespace to another; single flush."""
++        if SEP in new:
++            raise ValueError(f"namespace may not contain {SEP!r}: {new!r}")
++        old_prefix = old + SEP
++        moved = {}
++        for storage_key in list(self._data):
++            if storage_key.startswith(old_prefix):
++                _, key = split_key(storage_key)
++                moved[qualify(new, key)] = self._data.pop(storage_key)
++        if moved:
++            self._data.update(moved)
++            self._flush()
++        return len(moved)
++
++    def snapshot(self, namespace="default"):
++        """Return a plain dict copy of one namespace's keys and values."""
++        prefix = namespace + SEP
++        return {
++            split_key(k)[1]: v
++            for k, v in self._data.items()
++            if k.startswith(prefix)
++        }
+diff --git a/validators.py b/validators.py
+new file mode 100644
+index 0000000..a710cd9
+--- /dev/null
++++ b/validators.py
+@@ -0,0 +1,63 @@
++"""Value validators for records held in the store.
++
++Each validator is a callable taking the candidate value and returning the
++normalized value, or raising ValidationError with a message that names the
++offending constraint. Validators compose left-to-right through chain().
++"""
++
++
++class ValidationError(ValueError):
++    """A value failed validation; str(err) names the constraint."""
++
++
++def non_empty(value):
++    if value is None or (isinstance(value, str) and not value.strip()):
++        raise ValidationError("value must be non-empty")
++    return value
++
++
++def max_length(limit):
++    def check(value):
++        if len(value) > limit:
++            raise ValidationError(f"value exceeds {limit} characters")
++        return value
++    return check
++
++
++def one_of(*allowed):
++    allowed_set = set(allowed)
++
++    def check(value):
++        if value not in allowed_set:
++            names = ", ".join(sorted(map(str, allowed_set)))
++            raise ValidationError(f"value must be one of: {names}")
++        return value
++    return check
++
++
++def as_int(value):
++    try:
++        return int(value)
++    except (TypeError, ValueError):
++        raise ValidationError(f"not an integer: {value!r}")
++
++
++def in_range(low, high):
++    def check(value):
++        if not (low <= value <= high):
++            raise ValidationError(f"value must be between {low} and {high}")
++        return value
++    return check
++
++
++def chain(*validators):
++    """Compose validators left-to-right into a single validator."""
++    def check(value):
++        for validator in validators:
++            value = validator(value)
++        return value
++    return check
++
++
++PORT = chain(as_int, in_range(1, 65535))
++NAMESPACE = chain(non_empty, max_length(64))

@@ -1,0 +1,14 @@
+FILE: cli.py:118 | confidence: high
+QUOTE: COMMANDS["import"] = cmd_import
+DEFECT: This registration line sits after the `if __name__ == "__main__": sys.exit(main(sys.argv))` block (line 90). When cli.py is run as a script, main() executes and sys.exit raises SystemExit before line 118 is ever reached, so "import" is never added to COMMANDS.
+FAILURE: `python cli.py import data.json` prints "unknown command: import" and exits 2; the import command is unreachable in the CLI's primary (script) entry point.
+
+FILE: serialize.py:38 | confidence: high
+QUOTE:         _migrate_v1(payload["data"])
+DEFECT: The return value of _migrate_v1 is discarded. _migrate_v1 builds and returns a new dict (migrated = dict(data)) and never mutates its argument, so payload["data"] is left untouched and the next line returns the unmigrated v1 record.
+FAILURE: from_wire('{"v": 1, "data": {"key": "k", "tags": ["a"]}}') returns {"key": "k", "tags": ["a"]} instead of the promised v2 shape {"key": "k", "labels": ["a"], "meta": {}} — "tags" is never renamed to "labels" and "meta" is never added.
+
+FILE: cli.py:60 | confidence: medium
+QUOTE:         return 0
+DEFECT: In cmd_export's `except OSError` handler, the function prints "export failed" to stderr but returns 0, reporting success to the caller after the export failed. The sibling cmd_import added in the same change returns 1 for the identical failure mode, indicating 0 is a mistake.
+FAILURE: `python cli.py export /nonexistent-dir/out.json` prints "export failed: ..." yet exits with status 0, so a shell script or CI step treating the exit code as success proceeds with no export file.

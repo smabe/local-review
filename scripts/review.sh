@@ -5,20 +5,23 @@
 #   ./review.sh
 #   ./review.sh --intent "Cache the parsed manifest so repeated loads skip disk."
 #   ./review.sh --rounds 5 --json
-#   ./review.sh --provider llamaserver --model local-reviewer
+#   ./review.sh --provider lmstudio --model qwen/qwen3-coder-30b   # fast tier
 #
 # This file is BYTE-IDENTICAL in smabe/abe-skills and the public smabe/local-review
 # (tests/test_local_review_audit.sh enforces it). Fix bugs here once; never
 # hand-adapt one copy.
 #
-# With LM Studio it manages the model's lifecycle: loads it if it isn't
-# resident, and unloads it afterwards -- but only if this run is what loaded
-# it. A model you loaded yourself is left exactly as it was found.
+# The default reviewer is Qwen3.8-27B (thinking disabled) on llama-server --
+# start it first with scripts/llama_server.sh, which owns the model for the
+# life of the process. With --provider lmstudio the script manages the model
+# lifecycle instead: loads it if it isn't resident, and unloads it afterwards
+# -- but only if this run is what loaded it. A model you loaded yourself is
+# left exactly as it was found.
 #
 set -euo pipefail
 
-PROVIDER="lmstudio"
-MODEL="qwen/qwen3-coder-30b"
+PROVIDER="llamaserver"
+MODEL="qwen38-gguf-nothink"
 MODEL_EXPLICIT=0
 CONTEXT_LENGTH=49152
 ROUNDS=3
@@ -52,9 +55,10 @@ usage: review.sh [--intent SENTENCE] [--rounds N] [--json]
                      stability guard, not a speed knob.
   --json             Print pi's raw JSON event stream instead of the review.
                      Every run is audited either way; this shows the evidence.
-  --provider NAME    pi provider: lmstudio (default) or llamaserver.
-  --model ID         Model id as named in ~/.pi/agent/models.json. Auto-loading
-                     only knows the default, so load another one yourself.
+  --provider NAME    pi provider: llamaserver (default) or lmstudio.
+  --model ID         Model id as named in ~/.pi/agent/models.json. llama-server
+                     models must already be served (scripts/llama_server.sh);
+                     lmstudio models are loaded and unloaded for you.
 
 Exit status: 0 clean, 1 error, 2 usage, 3 the verdict cannot be trusted (the
 model read nothing, said nothing, or produced output that is neither a clean
@@ -81,13 +85,13 @@ case "$PROVIDER" in
   *) printf 'local-review: unknown provider: %s\n\n' "$PROVIDER" >&2; usage ;;
 esac
 
-# The default model belongs to lmstudio. pi does not reject an id the provider
-# never defined -- it forwards it and the per-model sampling settings silently
-# do not apply -- so the pairing is enforced here. Keyed on whether --model was
-# PASSED, not on its value: a llamaserver model may legitimately be named the
-# same as our default.
-if [ "$PROVIDER" != "lmstudio" ] && [ "$MODEL_EXPLICIT" -eq 0 ]; then
-  printf 'local-review: --provider %s needs an explicit --model (the default is an LM Studio id)\n\n' "$PROVIDER" >&2
+# The default model belongs to llamaserver. pi does not reject an id the
+# provider never defined -- it forwards it and the per-model sampling settings
+# silently do not apply -- so the pairing is enforced here. Keyed on whether
+# --model was PASSED, not on its value: an lmstudio model may legitimately be
+# named the same as our default.
+if [ "$PROVIDER" != "llamaserver" ] && [ "$MODEL_EXPLICIT" -eq 0 ]; then
+  printf 'local-review: --provider %s needs an explicit --model (the default is a llama-server id)\n\n' "$PROVIDER" >&2
   usage
 fi
 
@@ -126,10 +130,10 @@ else
   # optional: skipping it when curl is missing reintroduces the bare
   # "Connection error" this check exists to translate.
   command -v curl >/dev/null 2>&1 \
-    || die "curl is needed to check the llama-server endpoint -- install it, or use the default provider"
+    || die "curl is needed to check the llama-server endpoint -- install it, or use --provider lmstudio"
   curl -sf --max-time 5 "$LLAMA_URL" >/dev/null 2>&1 \
-    || die "no server answering at $LLAMA_URL -- start llama-server first
-     (scripts/llama_server.sh in the smabe/local-review repo does it)"
+    || die "no server answering at $LLAMA_URL -- start llama-server first:
+     scripts/llama_server.sh   (defaults to the Qwen3.8 reviewer, thinking off)"
 fi
 
 # --- is there anything to review? --------------------------------------------

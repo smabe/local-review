@@ -242,9 +242,9 @@ arg_is() { # $1=label  $2=expected exit  $3.. = args
 arg_is "unknown provider is a usage error"  2 --provider bogus --model x
 arg_is "provider is case-sensitive"         2 --provider LMStudio --model x
 arg_is "--provider with no value"           2 --provider
-# The default model id is an LM Studio one; pi forwards an id the provider never
-# defined rather than rejecting it, so the pairing is enforced up front.
-arg_is "llamaserver without --model"        2 --provider llamaserver
+# The default model id is a llama-server one; pi forwards an id the provider
+# never defined rather than rejecting it, so the pairing is enforced up front.
+arg_is "lmstudio without --model"           2 --provider lmstudio
 arg_is "--rounds needs a number"            1 --rounds abc
 arg_is "unknown flag"                       2 --nope
 
@@ -414,7 +414,9 @@ printf 'x = 1\n' > "$REPO/a.py"
 # A non-zero lms exit must not make the matched text invisible. If it does, the
 # script decides the model is absent, unloads and reloads it, and then unloads
 # a model the user had loaded -- breaking its own stated promise.
-out=$(cd "$REPO" && PATH="$STUBS:$PATH" HOME="$TMP/home" bash "$SCRIPT" 2>&1); rc=$?
+# The lmstudio lifecycle is opt-in now that llamaserver is the default; this
+# test exercises exactly that path, so it selects it explicitly.
+out=$(cd "$REPO" && PATH="$STUBS:$PATH" HOME="$TMP/home" bash "$SCRIPT" --provider lmstudio --model qwen/qwen3-coder-30b 2>&1); rc=$?
 case "$out" in
   *"already loaded"*) ok ;;
   *) bad "a non-zero lms exit hid the matching line (got: $(printf '%s' "$out" | head -1))" ;;

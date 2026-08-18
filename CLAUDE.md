@@ -8,9 +8,10 @@ A local, offline code reviewer driven by the
 [pi](https://github.com/earendil-works/pi) agent harness against any
 OpenAI-compatible endpoint — LM Studio (MLX) or llama-server today, and any
 model declared in `~/.pi/agent/models.json` via `--provider` / `--model`.
-Qwen3-Coder-30B is the default and the only model measured so far, not a
-requirement. `scripts/review.sh` is the whole product — everything else is a test,
-a fallback engine, or a legacy path. It is an **advisory pre-pass**; it never
+Qwen3.8-27B with thinking disabled (llama-server) is the measured default;
+Qwen3-Coder-30B on LM Studio is the fast tier for small diffs — it false-cleans
+large ones (bench/ holds the evidence for both). `scripts/review.sh` is the
+whole product — everything else is a test, the bench, or a legacy path. It is an **advisory pre-pass**; it never
 gates a commit and never replaces a frontier-model review.
 
 ## Commands
@@ -21,19 +22,21 @@ LOCAL_REVIEW_MIRROR=~/projects/abe-skills bash tests/test_local_review_audit.sh 
 python3 scripts/test_local_review_scope.py     # legacy diff-pipe scope tests
 python3 scripts/test_local_review_scope.py DefaultScopeIncludesUntracked.test_empty_repo_falls_back_to_untracked_only   # one case
 
+scripts/llama_server.sh                        # serve the default reviewer first (:8080)
 scripts/review.sh                              # run a review of the working tree
 scripts/review.sh --json                       # same, printing pi's raw event stream
-scripts/review.sh --provider llamaserver --model local-reviewer   # another engine/model
+scripts/review.sh --provider lmstudio --model qwen/qwen3-coder-30b   # fast tier, small diffs
 ```
 
 The audit suite has no per-test filter — it is one bash file with a
 `pass=/fail=/skipped=` footer. **Read `skipped=`**: the two drift checks report
 SKIP unless the private mirror is checked out, and a skip is not a pass.
 
-Auto-load only knows the default model, and a non-default provider must be
-paired with an explicit `--model` (pi silently forwards an id its provider never
-declared, so the per-model sampling settings just do not apply). Load anything
-else yourself. Model lifecycle by hand:
+The default provider is llamaserver: start the server yourself (it owns its
+model for the life of the process). A non-default provider must be paired with
+an explicit `--model` (pi silently forwards an id its provider never declared,
+so the per-model sampling settings just do not apply); lmstudio models are
+auto-loaded and unloaded by review.sh. LM Studio lifecycle by hand:
 `~/.lmstudio/bin/lms server status` · `lms ps` ·
 `lms load "qwen/qwen3-coder-30b" --yes --context-length 49152 --parallel 1` ·
 `lms unload --all`.

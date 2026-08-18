@@ -1,10 +1,13 @@
 # local-review
 
 A free, private, offline code reviewer that runs on your own Mac:
-**Qwen3-Coder-30B** served by LM Studio, driven by the
-[pi](https://github.com/earendil-works/pi) agent harness. It runs
-`git diff`, reads your changed files, and reports correctness bugs in
-~3–15 seconds per review, touching no network.
+**Qwen3.8-27B with thinking disabled**, served by llama-server and driven
+by the [pi](https://github.com/earendil-works/pi) agent harness. It runs
+`git diff`, reads your changed files, and reports correctness bugs —
+about a minute on a small diff, up to ~15 minutes on a large one — touching
+no network. A second tier, **Qwen3-Coder-30B** on LM Studio, reviews a
+small diff in ~5 seconds but false-cleans large ones (measured — see
+`bench/`); use it only when the diff is small and the clock matters.
 
 It is an **advisory pre-pass**, not a replacement for a frontier-model
 review: its blind spots are real but *uncorrelated* with the big models',
@@ -13,7 +16,8 @@ positive costs you a minute of reading; a false negative costs nothing if
 a real review still gates your commits.
 
 **Requirements:** Apple Silicon Mac with ~32 GB+ unified memory (the model
-takes ~25 GB), Node.js/npm, [LM Studio](https://lmstudio.ai).
+takes ~23 GB), Node.js/npm, llama.cpp (`brew install llama.cpp`).
+[LM Studio](https://lmstudio.ai) only if you want the fast tier.
 
 ---
 
@@ -22,24 +26,31 @@ takes ~25 GB), Node.js/npm, [LM Studio](https://lmstudio.ai).
 > If you are a coding agent (Claude Code, etc.) setting this up for your
 > user: follow these steps in order. Every step has a verification
 > command — do not proceed past a failing check. Total time is ~20
-> minutes, dominated by a ~18 GB model download.
+> minutes, dominated by a ~21 GB model download.
 
 ### 1. Serve the model
 
 ```bash
-# Download (skip if `lms ls` already shows it)
-~/.lmstudio/bin/lms get qwen/qwen3-coder-30b
+# Download the reviewer GGUF (~21 GB, one time)
+mkdir -p ~/models && curl -L -o ~/models/Qwen3.8-27B-Q6_K.gguf \
+  "https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/main/Qwen3.8-27B-Q6_K.gguf"
 
-# Load with a BOUNDED context — do not raise this, see Hard rules.
-# --parallel 1 matters: the default of 4 multiplies the KV allocation.
-~/.lmstudio/bin/lms load "qwen/qwen3-coder-30b" --yes --context-length 49152 --parallel 1
-
-# Start the OpenAI-compatible API server on :1234
-~/.lmstudio/bin/lms server start
+# Serve it on :8080. The script finds the GGUF, bounds context at 49152
+# (do not raise this -- see Hard rules), and disables thinking, which is
+# the measured reviewer configuration.
+scripts/llama_server.sh
 ```
 
-Verify: `curl -s http://localhost:1234/v1/models` lists
-`qwen/qwen3-coder-30b`.
+Verify: `curl -s http://localhost:8080/health` returns `{"status":"ok"}`.
+
+Optional fast tier (small diffs only), via LM Studio:
+
+```bash
+~/.lmstudio/bin/lms get qwen/qwen3-coder-30b
+~/.lmstudio/bin/lms server start
+# review.sh loads and unloads this model for you when you pass:
+#   --provider lmstudio --model qwen/qwen3-coder-30b
+```
 
 ### 2. Install pi and configure the provider
 
@@ -51,14 +62,14 @@ mkdir -p ~/.pi/agent
 
 Copy [`models.example.json`](models.example.json) from this repo to
 `~/.pi/agent/models.json`. If the user already has a `models.json`, merge
-the `lmstudio` provider block into it instead of overwriting. Do not add
+both provider blocks into it instead of overwriting. Do not add
 JSON comments — they fail silently.
 
 Verify (first call wakes the model and can take ~60s; a repeat should
 round-trip in 1–2s):
 
 ```bash
-pi --provider lmstudio --model "qwen/qwen3-coder-30b" \
+pi --provider llamaserver --model qwen38-gguf-nothink \
    --no-session -nc -ns -p "Reply with exactly: OK" </dev/null
 ```
 
@@ -80,13 +91,16 @@ cd <any repo with uncommitted changes>
 ```
 
 `scripts/review.sh` is the whole interface, for Claude users and everyone
-else alike. It checks the preconditions, loads the model if it is not
-already resident (and unloads it afterwards), assembles the round-capped
-prompt, runs pi, and audits the result. Nothing needs assembling by hand.
+else alike. It checks the preconditions (including that llama-server is
+answering — start it with `scripts/llama_server.sh`, which owns the model
+for the life of the process), assembles the round-capped prompt, runs pi,
+and audits the result. Nothing needs assembling by hand. On the lmstudio
+fast tier it additionally loads the model if it is not already resident and
+unloads it afterwards.
 
 One machine has one resident model, so reviews are serialised: a run holds a
-lock for its whole load/review/unload cycle, and a second run started while it
-is held exits immediately naming the process that holds it.
+lock for its whole duration, and a second run started while it is held exits
+immediately naming the process that holds it.
 
 Verify: in a repo with a deliberate bug, the script reports it as
 `FILE: path/to/file.py:LINE | confidence: ... / QUOTE: ... / DEFECT: ... / FAILURE: ...`
@@ -190,13 +204,14 @@ someone else's stated intent.
 | `tests/test_local_review_audit.sh` | 60+ assertions over the audit, the model lock, and argument validation. The code under test is extracted from `review.sh` at run time, so the tests cannot pass against a stale copy. Run with `bash tests/test_local_review_audit.sh`. Two drift checks report `SKIP` unless you also have the private repo checked out and point `LOCAL_REVIEW_MIRROR` at it — they compare this copy against its counterpart, which a standalone clone has nothing to compare to. `skipped=` in the footer is the count |
 | `skill/SKILL.md` | The Claude Code skill — invocation, the intent caveat, hard limits |
 | `models.example.json` | pi provider config for LM Studio (:1234) and llama-server (:8080) |
-| `scripts/llama_server.sh` | Fallback engine: serves a Qwen3-Coder GGUF via llama-server on :8080 — ~25% slower than MLX, zero crashes observed |
+| `docs/model-choice.md` | Decision record: why this model, the prompts, the settings, the harness |
+| `scripts/llama_server.sh` | Serves the default reviewer (Qwen3.8 GGUF, thinking off) via llama-server on :8080; pass a path + flags for anything else |
 | `scripts/local_review.py` | Legacy diff-pipe: posts a diff straight to the API, no agent loop. Only useful with *thinking* models, which review diffs well but are too slow to finish agentically. Do NOT use the coder model with it — diff-blind, it fabricates findings |
 | `scripts/test_local_review_scope.py` | Regression tests for the diff-pipe's review scope (untracked files, empty repos) |
 
 ## Hard rules (each one was paid for)
 
-- **Model: Qwen3-Coder-30B-A3B default; Qwen3.8-27B for accuracy.** The
+- **Model: Qwen3.8-27B no-think default; Qwen3-Coder-30B fast tier.** The
   bench/ seeded-defect eval (2026-08-18, both engines) scored Qwen3-Coder
   6/8 trusted catches (zero false positives under the shipped prompt; two mid-iteration prompt variants did produce clean-diff fabrications) at ~5s a review; it reliably
   misses the hardest case (a swallowed error path causing silent data loss).

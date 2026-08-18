@@ -12,6 +12,7 @@ uncorrelated with a cloud reviewer's; it does NOT replace one.
 
 ```bash
 cd <repo>
+scripts/llama_server.sh    # serve the default reviewer first (:8080)
 scripts/review.sh
 scripts/review.sh --intent "<one sentence>"
 ```
@@ -26,7 +27,7 @@ to get subtly wrong.
 | `--intent "<sentence>"` | you made the change and can state its purpose — read the caveat below first |
 | `--rounds N` | default 3; raise to 4–5 when the review needs a codebase search pass |
 | `--json` | print pi's raw event stream instead of the review |
-| `--provider` / `--model` | switch to the llama-server engine |
+| `--provider` / `--model` | switch engine/model — e.g. `--provider lmstudio --model qwen/qwen3-coder-30b` for the ~5s fast tier on SMALL diffs (it false-cleans large ones) |
 
 **It manages the model for you** (LM Studio only). If the model isn't resident
 it clears what is loaded, loads it at 49152 context, and unloads it when the
@@ -115,7 +116,7 @@ claims you have not checked against the source.
   the prompt (component map + behavioural contract), which flips it to a
   correct verdict — but that is verification against an authored spec, not
   discovery, and a stale block blinds it.
-- **Model choice: Qwen3-Coder-30B-A3B default; Qwen3.8-27B for accuracy.** A
+- **Model choice: Qwen3.8-27B no-think default; Qwen3-Coder-30B fast tier.** A
   5-case seeded-defect eval (4 planted bugs + 1 clean diff, 2+ runs per arm,
   both engines, 2026-08-18) scored Qwen3-Coder 6/8 catches with zero false
   positives at ~5s/review — it reliably misses the hardest case (a swallowed
@@ -141,13 +142,15 @@ claims you have not checked against the source.
   tokens of workflow rules aimed at an implementing agent, with no correctness
   content.
 
-## Fallback engine — llama-server (GGUF)
+## Engines
 
-If the MLX engine misbehaves, or you are not on Apple Silicon,
-`scripts/llama_server.sh` serves a Q6 GGUF on :8080 — about 25% slower
-generation, zero crashes observed across the whole experiment. Point the script
-at it with `--provider llamaserver --model local-reviewer`, using the second
-provider entry in `models.example.json`.
+llama-server is the default engine: `scripts/llama_server.sh` serves the
+reviewer GGUF on :8080 (Qwen3.8, thinking disabled — the measured
+configuration) and owns the model for the life of the process; zero crashes
+observed across the whole experiment. LM Studio (MLX) is the fast tier:
+review.sh manages its model lifecycle for you, but its engine dies on long
+single generations — the 3-round budget exists because of it — and thinking
+cannot be controlled through its API.
 
 ## Legacy path — diff-pipe script
 
