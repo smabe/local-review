@@ -35,21 +35,30 @@ def main():
     out = [lines[0]]
     changed = 0
 
-    seen = set()
-    for line in lines[1:]:
-        if not line.strip():
-            continue
+    # run_bigdiff.sh appends; a re-run under an old label leaves two rows
+    # sharing one log path, and the log on disk belongs to the LATEST run.
+    # Pre-pass: mark which row index owns each log, so only that row is
+    # rescored from it. (A first-pass `seen` guard gets this exactly
+    # backwards -- rows walk in file order, so the FIRST occurrence falls
+    # through to the rescore and the older observation is overwritten with
+    # the newer run's findings. Measured 2026-08-18 by the benchmark
+    # session, against this very file.)
+    data = [ln for ln in lines[1:] if ln.strip()]
+    owner = {}
+    for i, ln in enumerate(data):
+        cols = ln.split("\t")
+        owner[(cols[idx["label"]], cols[idx["run"]])] = i
+
+    for i, line in enumerate(data):
         cols = line.split("\t")
         label, run = cols[idx["label"]], cols[idx["run"]]
-        # run_bigdiff.sh appends; a re-run under an old label leaves two rows
-        # sharing one log path. Rescoring both from the same transcript would
-        # turn two observations into two identical ones -- rescore only the
-        # last (the one the current log belongs to) and say so.
-        if (label, run) in seen:
-            print(f"  duplicate row {label} run {run}: only the LAST one is "
-                  f"backed by the log; earlier duplicate left as-is")
+        if owner[(label, run)] != i:
+            print(f"  duplicate row {label} run {run}: the log belongs to the "
+                  f"LAST occurrence; this earlier observation left as-is")
+            out.append(line)
+            continue
         log = BENCH / "logs" / f"{label}-bigdiff-r{run}.txt"
-        if (label, run) in seen or not log.exists() or log.stat().st_size == 0:
+        if not log.exists() or log.stat().st_size == 0:
             # No usable transcript, no rescore -- keep the row rather than
             # silently zeroing a result whose evidence was truncated or
             # cleaned up. (A zero-byte log is a truncation artifact, not a
@@ -57,12 +66,9 @@ def main():
             # the log's earlier contents. Measured 2026-08-18: an aborted
             # same-label relaunch truncated a 5/5 run's log and a rescore
             # rewrote the row to EMPTY-LOG.)
-            if not (label, run) in seen:
-                print(f"  no usable log for {label} run {run}, left as-is")
-            seen.add((label, run))
+            print(f"  no usable log for {label} run {run}, left as-is")
             out.append(line)
             continue
-        seen.add((label, run))
 
         res = subprocess.run([sys.executable, str(SCORER), str(log)],
                              capture_output=True, text=True)
