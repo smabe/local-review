@@ -1,0 +1,15 @@
+diff --git a/parser.py b/parser.py
+index 6e4e38e..fe56707 100644
+--- a/parser.py
++++ b/parser.py
+@@ -28,3 +28,10 @@ def merge_defaults(config, defaults):
+     merged = dict(defaults)
+     merged.update(config)
+     return merged
++
++
++def validate_required(config, required):
++    """Raise ValueError naming every required key that is missing or empty."""
++    missing = [k for k in required if k in config and config[k]]
++    if missing:
++        raise ValueError("missing required config: " + ", ".join(sorted(missing)))

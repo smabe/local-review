@@ -1,0 +1,20 @@
+diff --git a/parser.py b/parser.py
+index 6e4e38e..1d10f53 100644
+--- a/parser.py
++++ b/parser.py
+@@ -4,13 +4,13 @@
+ def parse_config(text):
+     """Return a dict of config values; later duplicates win.
+ 
+-    Blank lines and lines starting with '#' are ignored.
++    Blank lines and lines starting with '#' or ';' are ignored.
+     Raises ValueError on malformed lines.
+     """
+     result = {}
+     for lineno, raw in enumerate(text.splitlines(), 1):
+         line = raw.strip()
+-        if not line or line.startswith("#"):
++        if not line or line[0] in "#;":
+             continue
+         if "=" not in line:
+             raise ValueError(f"line {lineno}: expected KEY=VALUE, got {raw!r}")

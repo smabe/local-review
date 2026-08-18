@@ -1,0 +1,4 @@
+FILE: parser.py:35 | confidence: high
+QUOTE:     missing = [k for k in required if k in config and config[k]]
+DEFECT: The condition is inverted — it selects required keys that are present and non-empty instead of keys that are missing or empty, so the function raises exactly when the config is valid and silently passes when it is not.
+FAILURE: validate_required({}, ["host"]) returns without error despite "host" being absent; validate_required({"host": "db1"}, ["host"]) raises ValueError even though "host" is present and non-empty.

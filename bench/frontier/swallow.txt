@@ -1,0 +1,4 @@
+FILE: store.py:16 | confidence: high
+QUOTE:         except (json.JSONDecodeError, OSError):
+DEFECT: Catching OSError and continuing with an empty _data turns a transient read failure on a valid store file into silent data loss — the next set()/delete() calls _flush(), whose os.replace atomically overwrites the intact on-disk file with the near-empty in-memory dict.
+FAILURE: Store file valid but open(path) raises PermissionError; Store(path) loads {}; store.set("k","v") replaces the file with {"k": "v"}, permanently losing every previously stored key.

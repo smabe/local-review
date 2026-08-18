@@ -103,6 +103,10 @@ command -v python3 >/dev/null 2>&1 || die "python3 is not on PATH (needed to aud
 
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
   || die "not inside a git repository -- cd to the repo first"
+# Anchor at the toplevel: git prints root-relative paths, the model reads files
+# by those paths, and the audit's quote gate resolves them with os.path.isfile.
+# From a subdirectory all three silently diverge.
+cd "$(git rev-parse --show-toplevel)" || die "cannot cd to the repo toplevel"
 
 if [ "$PROVIDER" = "lmstudio" ]; then
   [ -x "$LMS" ] || die "lms CLI not found (looked on PATH and at \$HOME/.lmstudio/bin/lms)"
@@ -248,7 +252,17 @@ Rules you must obey:
 2. Defects live in code and in configuration that affects behaviour (CI files, manifests, build and runtime settings). Never report that documentation, comments, prose, or a README "should" say or enforce something.
 3. Confirming that a change does what it intended is NOT review. Never produce a checklist of what the change accomplishes.
 4. A difference between two independent components is not a defect unless you can show one calls the other.
-5. If you are unsure, omit it. A missed bug costs less than a false one.'
+5. If you are unsure, omit it. A missed bug costs less than a false one.
+6. Judge the lines this change adds or edits; unchanged code is context. In diff output, lines starting with "-" are the OLD version -- never report a defect in them.
+7. Style, naming, formatting, and missing-comment issues are never defects.
+8. Before judging a changed hunk, read the complete enclosing function.
+9. If while writing or checking a finding you conclude the code is actually correct, discard that finding entirely. Never emit a finding and then argue against it.
+Each finding uses four labeled lines; keep every value on the same line as its label. One complete example (synthetic -- never echo it):
+FILE: example/demo.py:12 | confidence: high
+QUOTE: total =+ amount
+DEFECT: `=+` reassigns total to +amount instead of adding to it.
+FAILURE: Summing [5, 5] returns 5, not 10.
+When there are no defects your entire message is exactly: No findings.'
 
 if [ -n "$INTENT" ]; then
   OPENING="Review the uncommitted changes in this repository for correctness bugs, judging every change AGAINST THIS INTENT: ${INTENT} A change that implements the stated intent is correct by definition; do not report it. Report only defects that contradict the intent or are unrelated to it."
@@ -260,11 +274,12 @@ PROMPT="${OPENING}
 HARD BUDGET: at most ${ROUNDS} rounds of tool calls, then give your verdict — batch commands (round 1: git status --short && ${DIFF_CMD}; round 2: read the changed files).
 Untracked files do not appear in ${DIFF_CMD}: enumerate them with git ls-files --others --exclude-standard and read them directly. Do not run git add.
 Report each defect in exactly this form, most severe first:
-FILE:LINE | confidence: high|medium|low
+FILE: path/to/file.py:LINE | confidence: high|medium|low
 QUOTE: <the offending line, copied verbatim>
 DEFECT: <what is wrong with that line>
 FAILURE: <concrete input or state that produces wrong behaviour>
-If and only if there are no defects, output exactly: No findings."
+If and only if there are no defects, your entire verdict message must be exactly: No findings.
+Final reminder -- the only two valid outputs: findings as FILE:/QUOTE:/DEFECT:/FAILURE: blocks (values on the label line), or exactly: No findings."
 
 if [ "$DIFF_BYTES" -gt "$DIFF_TRUNCATION_BYTES" ]; then
   PROMPT="${PROMPT}
@@ -303,7 +318,7 @@ run_pi >"$RAW" || RC=$?
 # been measured getting wrong: appending "No findings." underneath real
 # findings (2 of 7 runs), returning empty output, and abandoning the format.
 python3 - "$RAW" "$RAW_STREAM" <<'PY' || AUDIT=$?
-import json, re, sys
+import json, os, re, sys
 
 texts, started, succeeded, peak = [], 0, 0, 0
 last_stop, last_error = None, None
@@ -366,16 +381,51 @@ PLACEHOLDERS = {
     "<what is wrong with that line>",
     "<concrete input or state that produces wrong behaviour>",
     "file:line",
+    "path/to/file.py:line",
+    "example/demo.py:12",
 }
 
 def is_placeholder(value):
-    v = value.strip()
+    v = value.strip().strip("`").strip()
     return v.lower() in PLACEHOLDERS or bool(re.match(r"^\.{2,}$", v))
 
 def prose(value):
     """A description field: must say something, not just punctuate."""
     v = value.strip()
     return bool(v) and bool(re.search(r"[A-Za-z0-9]", v)) and not is_placeholder(v)
+
+def quote_in_named_file(path, quote):
+    """Anti-fabrication gate: when the FILE header names a file that exists,
+    the QUOTE must occur in it (whitespace- and backtick-insensitive). A file
+    that does not exist cannot be checked -- quoting a real file with an
+    invented line is the measured fabrication mode; invented paths remain
+    the prompt rules' job."""
+    fname = re.sub(r":\d+(-\d+)?$", "", path)
+    if not os.path.isfile(fname):
+        return True
+    # Models copy quotes with collapsed whitespace runs, surrounding backticks,
+    # or the diff's own +/- marker still attached; none of those make the quote
+    # fabricated. Compare with runs collapsed, and with a single leading diff
+    # marker optionally stripped -- but never strip it from the file side, where
+    # a leading "-" is real source.
+    base = " ".join(quote.strip().strip("`").split())
+    if not base:
+        # The quote was nothing but backticks -- then that IS the line.
+        base = " ".join(quote.split())
+    if not base:
+        return False
+    variants = {base}
+    if base[:1] in "+-" and base[1:].strip():
+        variants.add(" ".join(base[1:].split()))
+    try:
+        with open(fname, errors="replace") as fh:
+            for ln in fh:
+                nl = " ".join(ln.split())
+                if any(v in nl for v in variants):
+                    return True
+    except OSError:
+        return True
+    return False
 
 def valid(match):
     path = match.group("file").strip()
@@ -388,6 +438,8 @@ def valid(match):
     # placeholder is required of it.
     q = match.group("quote").strip()
     if not q or is_placeholder(q):
+        return False
+    if not quote_in_named_file(path, match.group("quote")):
         return False
     return all(prose(match.group(g)) for g in ("defect", "failure"))
 

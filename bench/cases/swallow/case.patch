@@ -1,0 +1,20 @@
+diff --git a/store.py b/store.py
+index 40b46a8..b229e3d 100644
+--- a/store.py
++++ b/store.py
+@@ -8,9 +8,13 @@ class Store:
+     def __init__(self, path):
+         self.path = path
+         self._data = {}
++        # A corrupt or unreadable store starts empty rather than crashing.
+         if os.path.exists(path):
+-            with open(path) as fh:
+-                self._data = json.load(fh)
++            try:
++                with open(path) as fh:
++                    self._data = json.load(fh)
++            except (json.JSONDecodeError, OSError):
++                pass
+ 
+     def get(self, key, default=None):
+         return self._data.get(key, default)

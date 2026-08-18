@@ -89,7 +89,7 @@ lock for its whole load/review/unload cycle, and a second run started while it
 is held exits immediately naming the process that holds it.
 
 Verify: in a repo with a deliberate bug, the script reports it as
-`FILE:LINE | confidence: ... / QUOTE: ... / DEFECT: ... / FAILURE: ...`
+`FILE: path/to/file.py:LINE | confidence: ... / QUOTE: ... / DEFECT: ... / FAILURE: ...`
 followed by an audit line reading `audit: N tool call(s), 1 defect(s)`.
 
 ---
@@ -134,7 +134,7 @@ The two rules doing the work: **quote the exact offending line verbatim or
 the defect does not exist**, and **prose and documentation cannot contain a
 defect**. Drop either and the fabrications come back.
 
-Findings come back structured — `FILE:LINE | confidence`, `QUOTE:`,
+Findings come back structured — `FILE: path/to/file.py:LINE | confidence`, `QUOTE:`,
 `DEFECT:`, `FAILURE:` — which is what lets the script count them.
 
 ### Every run is audited
@@ -196,14 +196,19 @@ someone else's stated intent.
 
 ## Hard rules (each one was paid for)
 
-- **Model: Qwen3-Coder-30B-A3B** for the agentic path. Two alternatives were
-  measured against a planted off-by-one and both lost. A **Qwen3.8-27B**
-  thinking model writes the best analysis of anything tested and finishes a
-  tiny diff in under two minutes, but a 19KB diff went unfinished at both 10
-  and 20 minutes. **Devstral Small 2 24B** missed the planted bug 8 times out
-  of 9 despite reading the diff every run — its higher SWE-bench score
-  measures *fixing* a bug you have been handed, which is the opposite of
-  detection. A 9B produces slop.
+- **Model: Qwen3-Coder-30B-A3B default; Qwen3.8-27B for accuracy.** The
+  bench/ seeded-defect eval (2026-08-18, both engines) scored Qwen3-Coder
+  6/8 trusted catches (zero false positives under the shipped prompt; two mid-iteration prompt variants did produce clean-diff fabrications) at ~5s a review; it reliably
+  misses the hardest case (a swallowed error path causing silent data loss).
+  **Qwen3.8-27B** caught 31/32 with zero false positives — and stays that
+  accurate on llama-server with thinking disabled (`--reasoning-budget 0`),
+  ~100s a review. Its old 19KB-diff stall was measured in thinking mode;
+  no-think bounds generations but is unverified on big diffs — validate
+  before promoting it to default. **Devstral Small 2 24B**: 5/8 strict, same
+  hard-case blindness plus intermittent leak misses; its 2512 GGUFs do not
+  load on llama.cpp stable 10450. **GLM-4.7-Flash** fabricates
+  plausibly-quoted findings and wedged the MLX engine; disqualified. A 9B
+  produces slop.
 - **Thinking cannot be limited through LM Studio.** Probed against its OpenAI
   endpoint: `chat_template_kwargs.enable_thinking`, a top-level
   `enable_thinking`, and `reasoning_effort` are all accepted and all ignored.

@@ -1,0 +1,13 @@
+diff --git a/store.py b/store.py
+index 40b46a8..fb8e4b5 100644
+--- a/store.py
++++ b/store.py
+@@ -37,3 +37,8 @@ class Store:
+             if os.path.exists(tmp):
+                 os.unlink(tmp)
+             raise
++
++    def export(self, path):
++        """Write a snapshot of the store to path as JSON."""
++        fh = open(path, "w")
++        json.dump(self._data, fh)

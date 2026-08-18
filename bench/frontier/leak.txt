@@ -1,0 +1,4 @@
+FILE: store.py:43 | confidence: high
+QUOTE: fh = open(path, "w")
+DEFECT: File handle opened without a context manager, never closed or flushed; JSON can sit in the buffer and closure depends on garbage collection.
+FAILURE: On PyPy, or if json.dump raises (truncated partial file), a caller reading the exported path right after export() sees an empty or incomplete JSON document.

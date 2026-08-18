@@ -76,10 +76,51 @@ audit_is() {
     [ "$got" -eq "$2" ] && ok || bad "$1 (expected exit $2, got $got)"
 }
 
-FINDING='FILE:metrics.py:15 | confidence: high
+# Fixture paths live under $TMP/none -- a directory that never exists --
+# so the audit's quote-vs-file gate stays exempt no matter the cwd.
+FINDING="FILE: $TMP/none/metrics.py:15 | confidence: high
 QUOTE: end = min(start + per_page, total - 1)
 DEFECT: off by one
-FAILURE: page 2 of 10 items drops index 9'
+FAILURE: page 2 of 10 items drops index 9"
+
+# The quote-vs-file gate: a FILE header naming a file that exists on disk
+# demands the QUOTE actually occur in that file. Fixture written to $TMP so
+# the repo needs no test-data file; nonexistent fixture paths elsewhere in
+# this suite stay exempt by design.
+printf 'first_line = 0\nthe_real_line = 1\n\x60\n' > "$TMP/quotegate.py"
+audit_is "real file, real quote"     4 3 "FILE: $TMP/quotegate.py:2 | confidence: high
+QUOTE: the_real_line = 1
+DEFECT: assigns a constant where a computed value is required
+FAILURE: every caller sees 1"
+audit_is "real file, invented quote" 3 3 "FILE: $TMP/quotegate.py:2 | confidence: high
+QUOTE: invented_line = 99
+DEFECT: assigns a constant where a computed value is required
+FAILURE: every caller sees 99"
+
+# Gate semantics pinned: a fabricated quote anywhere poisons the whole verdict
+# (label counts no longer match valid blocks -> exit 3), a wholesale echo of the
+# prompt's worked example dies on its placeholder path, and normalization
+# accepts quotes carried with backticks, collapsed whitespace, or a diff marker.
+audit_is "fabricated quote poisons verdict" 3 3 "FILE: $TMP/quotegate.py:2 | confidence: high
+QUOTE: the_real_line = 1
+DEFECT: assigns a constant where a computed value is required
+FAILURE: every caller sees 1
+FILE: $TMP/quotegate.py:1 | confidence: high
+QUOTE: fabricated_line = 42
+DEFECT: also looks wrong
+FAILURE: never happens"
+audit_is "echoed worked example"            3 3 'FILE: example/demo.py:12 | confidence: high
+QUOTE: total =+ amount
+DEFECT: `=+` reassigns total to +amount instead of adding to it.
+FAILURE: Summing [5, 5] returns 5, not 10.'
+audit_is "quote with diff marker+backticks" 4 3 "FILE: $TMP/quotegate.py:2 | confidence: high
+QUOTE: \`+the_real_line  =  1\`
+DEFECT: assigns a constant where a computed value is required
+FAILURE: every caller sees 1"
+audit_is "backtick-only quote is a real line"  4 3 "FILE: $TMP/quotegate.py:3 | confidence: low
+QUOTE: \`
+DEFECT: stray backtick opens an unterminated command substitution
+FAILURE: sourcing the file swallows every following line"
 
 # 0 = clean. The clean verdict is the WHOLE output, never a phrase inside it.
 audit_is "exact clean verdict"            0 3 'No findings.'
@@ -93,10 +134,10 @@ audit_is "two complete findings"          4 3 "$FINDING
 $FINDING"
 audit_is "finding plus trailing sentinel" 4 3 "$FINDING
 No findings."
-audit_is "extensionless path"             4 3 'FILE: Makefile:12 | confidence: low
+audit_is "extensionless path"             4 3 "FILE: $TMP/none/Makefile:12 | confidence: low
 QUOTE: CFLAGS = -O2
 DEFECT: wrong flag
-FAILURE: build breaks'
+FAILURE: build breaks"
 
 # 3 = the verdict could not be established.
 audit_is "labels out of order"            3 3 'DEFECT: bad
@@ -117,19 +158,19 @@ FAILURE: boom'
 # finding on a stray closing brace is still a finding. Only DEFECT and FAILURE
 # are prose fields that must actually say something.
 for q in "}" "});" "[weak self]" "(status == 0)"; do
-    audit_is "punctuation-only QUOTE $q"  4 3 "FILE:a.swift:12 | confidence: high
+    audit_is "punctuation-only QUOTE $q"  4 3 "FILE: $TMP/none/a.swift:12 | confidence: high
 QUOTE: $q
 DEFECT: leaks self
 FAILURE: retain cycle survives dismissal"
 done
-audit_is "exact prompt placeholder QUOTE" 3 3 "FILE:a.swift:12 | confidence: high
+audit_is "exact prompt placeholder QUOTE" 3 3 "FILE: $TMP/none/a.swift:12 | confidence: high
 QUOTE: <the offending line, copied verbatim>
 DEFECT: leaks self
 FAILURE: retain cycle survives dismissal"
 # Angle brackets are ordinary source in JSX, HTML and XML. Only the prompt's
 # exact placeholders are rejected, never the shape.
 for q in "<div>" "<Foo />" "</section>"; do
-    audit_is "markup QUOTE $q"            4 3 "FILE:App.jsx:12 | confidence: high
+    audit_is "markup QUOTE $q"            4 3 "FILE: $TMP/none/App.jsx:12 | confidence: high
 QUOTE: $q
 DEFECT: element never closed
 FAILURE: everything below it stops rendering"

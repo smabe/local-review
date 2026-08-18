@@ -115,13 +115,21 @@ claims you have not checked against the source.
   the prompt (component map + behavioural contract), which flips it to a
   correct verdict — but that is verification against an authored spec, not
   discovery, and a stale block blinds it.
-- **Model choice: Qwen3-Coder-30B-A3B.** Two alternatives were measured against
-  a planted off-by-one and both lost. A Qwen3.8-27B thinking model writes the
-  best analysis of anything tested and finishes a tiny diff in under two
-  minutes, but a 19KB diff went unfinished at both 10 and 20 minutes. Devstral
-  Small 2 24B missed the planted bug 8 times out of 9 despite reading the diff
-  every run — its higher SWE-bench score measures *fixing* a bug you have been
-  handed, which is the opposite of detection.
+- **Model choice: Qwen3-Coder-30B-A3B default; Qwen3.8-27B for accuracy.** A
+  5-case seeded-defect eval (4 planted bugs + 1 clean diff, 2+ runs per arm,
+  both engines, 2026-08-18) scored Qwen3-Coder 6/8 catches with zero false
+  positives at ~5s/review — it reliably misses the hardest case (a swallowed
+  error path causing silent data loss). Qwen3.8-27B caught 31/32 across every
+  prompt version with zero false positives, and stays that accurate on
+  llama-server with thinking DISABLED (`--reasoning-budget 0`), ~40% faster
+  than thinking mode (~100s median). Its earlier 19KB-diff stall was measured
+  in thinking mode; no-think bounds generations, but big-diff behaviour is
+  unverified — validate before making it the default. Devstral Small 2 24B:
+  5/8 strict (misses the same hard case both runs, plus intermittent leak
+  misses); its 2512 GGUFs do not load on llama.cpp stable 10450
+  ("invalid gguf type for tokenizer.ggml.scores"). GLM-4.7-Flash
+  fabricates plausibly-quoted findings and wedged LM Studio's MLX engine;
+  disqualified.
 - **Thinking cannot be limited through LM Studio.** Probed directly against its
   OpenAI endpoint: `chat_template_kwargs.enable_thinking`, a top-level
   `enable_thinking`, and `reasoning_effort` are all accepted and all ignored.

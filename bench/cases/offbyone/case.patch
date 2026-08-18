@@ -1,0 +1,15 @@
+diff --git a/store.py b/store.py
+index 40b46a8..f96759f 100644
+--- a/store.py
++++ b/store.py
+@@ -37,3 +37,10 @@ class Store:
+             if os.path.exists(tmp):
+                 os.unlink(tmp)
+             raise
++
++    def recent_keys(self, n):
++        """Return the n most recently inserted keys, oldest first."""
++        if n <= 0:
++            return []
++        keys = list(self._data)
++        return keys[-n - 1:-1]

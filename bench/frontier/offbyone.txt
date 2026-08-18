@@ -1,0 +1,4 @@
+FILE: store.py:46 | confidence: high
+QUOTE:         return keys[-n - 1:-1]
+DEFECT: The slice `keys[-n - 1:-1]` always excludes the last element (the most recently inserted key) and shifts the window one position toward older keys; the n most recent keys oldest-first is `keys[-n:]`.
+FAILURE: With keys inserted in order "a", "b", "c", "d", `recent_keys(2)` returns ["b", "c"] instead of ["c", "d"]; with 3 keys, `recent_keys(3)` returns only ["a", "b"], omitting the newest key entirely.
