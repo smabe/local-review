@@ -202,9 +202,10 @@ someone else's stated intent.
   misses the hardest case (a swallowed error path causing silent data loss).
   **Qwen3.8-27B** caught 31/32 with zero false positives — and stays that
   accurate on llama-server with thinking disabled (`--reasoning-budget 0`),
-  ~100s a review. Its old 19KB-diff stall was measured in thinking mode;
-  no-think bounds generations but is unverified on big diffs — validate
-  before promoting it to default. **Devstral Small 2 24B**: 5/8 strict, same
+  ~100s a review. Big-diff validated (18KB fixture, 2026-08-18):
+  no-think completes in 9-15 min with real findings and zero fabrications,
+  while Qwen3-Coder false-cleaned the same diff twice in ~20s — use the
+  accuracy pick for anything beyond a small diff. **Devstral Small 2 24B**: 5/8 strict, same
   hard-case blindness plus intermittent leak misses; its 2512 GGUFs do not
   load on llama.cpp stable 10450. **GLM-4.7-Flash** fabricates
   plausibly-quoted findings and wedged the MLX engine; disqualified. A 9B

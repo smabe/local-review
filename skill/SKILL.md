@@ -122,9 +122,10 @@ claims you have not checked against the source.
   error path causing silent data loss). Qwen3.8-27B caught 31/32 across every
   prompt version with zero false positives, and stays that accurate on
   llama-server with thinking DISABLED (`--reasoning-budget 0`), ~40% faster
-  than thinking mode (~100s median). Its earlier 19KB-diff stall was measured
-  in thinking mode; no-think bounds generations, but big-diff behaviour is
-  unverified — validate before making it the default. Devstral Small 2 24B:
+  than thinking mode (~100s median). Big-diff validated (18KB fixture, 2026-08-18):
+  no-think completes in 9-15 min with real findings and zero fabrications,
+  while Qwen3-Coder false-cleaned the same diff twice in ~20s — use the
+  accuracy pick for anything beyond a small diff. Devstral Small 2 24B:
   5/8 strict (misses the same hard case both runs, plus intermittent leak
   misses); its 2512 GGUFs do not load on llama.cpp stable 10450
   ("invalid gguf type for tokenizer.ggml.scores"). GLM-4.7-Flash
