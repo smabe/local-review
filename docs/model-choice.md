@@ -112,8 +112,12 @@ opening line and inherits every error in the intent's source.
 
 ## The settings
 
-Context is 49152 with `--parallel 1` everywhere — a 96K attempt wired ~35 GB
-and kernel-panicked a 48 GB machine. Output caps at 8192 tokens (12000 for
+Context is 49152 with `--parallel 1` everywhere — the size every accuracy
+number was measured at. The historical 96K kernel panic (~35 GB wired) was
+MLX/LM Studio-specific; on llama-server with Qwen3.8 a monitored ramp
+(2026-08-18) measured 96K at 31.5 GB wired peak with clean teardown, so
+higher context is a documented opt-in (`LLAMA_CTX`), unmeasured for
+accuracy, with full-window prefill running ~8 minutes. Output caps at 8192 tokens (12000 for
 thinking arms). Per-model sampling lives in `~/.pi/agent/models.json`
 (template: `models.example.json`); pi merges `samplingParams` verbatim into
 every request body, which is how request-level engine knobs are reachable

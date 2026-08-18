@@ -35,9 +35,9 @@ takes ~23 GB), Node.js/npm, llama.cpp (`brew install llama.cpp`).
 mkdir -p ~/models && curl -L -o ~/models/Qwen3.8-27B-Q6_K.gguf \
   "https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/main/Qwen3.8-27B-Q6_K.gguf"
 
-# Serve it on :8080. The script finds the GGUF, bounds context at 49152
-# (do not raise this -- see Hard rules), and disables thinking, which is
-# the measured reviewer configuration.
+# Serve it on :8080. The script finds the GGUF, defaults context to 49152
+# (raise via LLAMA_CTX if that suits your machine -- see Context sizing),
+# and disables thinking, which is the measured reviewer configuration.
 scripts/llama_server.sh
 ```
 
@@ -231,8 +231,7 @@ someone else's stated intent.
   pi does not send a level either unless the provider declares a
   `thinkingFormat` or `supportsReasoningEffort: true`. Seeing thinking blocks
   in the event stream proves thinking happened, not that a level was honoured.
-- **Context stays at 49152.** A 96K attempt wired ~35 GB of memory and
-  kernel-panicked a 48 GB machine. Leave LM Studio guardrails on Strict.
+- **Leave LM Studio guardrails on Strict.**
 - **Review diffs, not whole files.** Pointed at committed files with no
   diff anchor, the reviewer fabricated 7/7 findings. If you must audit
   whole files, supply a component map + behavioral contract in the prompt
@@ -246,6 +245,17 @@ someone else's stated intent.
 - **After a reboot**, the model may load while the API server stays down:
   `lms server status` / `lms server start`. A dead server shows up in pi
   as a bare "Connection error."
+
+## Context sizing — a suggestion, not a rule
+
+49152 is the default because it is the size every accuracy number was
+measured at — use whatever works on your machine. Data points to judge by:
+on llama-server with Qwen3.8, 96K measured 31.5 GB wired at peak on a 48 GB
+Mac (`LLAMA_CTX=98304 scripts/llama_server.sh`, plus a matching
+`contextWindow` in `~/.pi/agent/models.json`); prefill on a full 96K window
+runs ~8 minutes; review accuracy above 49152 is unmeasured. On MLX/LM
+Studio our one 96K attempt wired ~35 GB and kernel-panicked the machine,
+so we keep MLX at 49152 ourselves.
 
 ## License
 

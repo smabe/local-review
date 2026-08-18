@@ -101,8 +101,8 @@ rather than passing against a stale copy — keep it that way.
 Each cost something to learn; the README's "Hard rules" section carries the full
 list and the evidence.
 
-- **Context stays at 49152, `--parallel 1`.** A 96K attempt wired ~35 GB and
-  kernel-panicked a 48 GB machine.
+- **`--parallel 1`.** Parallel slots split the context allocation N ways and
+  pi is a single client.
 - **The 3-round tool budget is a stability guard, not a speed knob.** LM Studio's
   MLX engine dies on long single generations (~11K tokens); capped rounds plus
   `maxTokens: 8192` keep every generation under it. llama-server does not have
@@ -118,6 +118,14 @@ list and the evidence.
 - **`--intent` inherits every error in the intent's source.** It makes the stated
   intent unfalsifiable, which also holds when the intent is wrong.
 - **Never `git add`.** An advisory reviewer must not touch the index.
+
+Context sizing is a suggestion, not a constraint: 49152 is the default
+because every accuracy number was measured there. Measured data for anyone
+raising it: llama-server + Qwen3.8 at 96K peaked at 31.5 GB wired on a 48 GB
+machine (`LLAMA_CTX=98304`, matching `contextWindow` in models.json; accuracy
+above 49152 unmeasured; full-window prefill ~8 min). The one 96K attempt on
+MLX/LM Studio wired ~35 GB and kernel-panicked the machine — we keep MLX at
+49152 ourselves.
 
 Targets **bash 3.2** (macOS system bash): guard empty array expansion as
 `${a[@]+"${a[@]}"}` under `set -u`. In the EXIT trap every branch is a full `if`

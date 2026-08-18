@@ -40,13 +40,17 @@ exec llama-server \
   --alias "${LLAMA_ALIAS:-qwen38-gguf-nothink}" \
   --port 8080 \
   --jinja \
-  --ctx-size 49152 \
+  --ctx-size "${LLAMA_CTX:-49152}" \
   --parallel 1 \
   --flash-attn on \
   ${CACHE_FLAGS[@]+"${CACHE_FLAGS[@]}"} \
   ${REASONING_FLAGS[@]+"${REASONING_FLAGS[@]}"} \
   "$@"
-# --jinja: required for Qwen3-Coder's chat template + tool-call parsing.
-# --ctx-size: bounded on purpose — huge contexts are what blow up KV memory.
-# --parallel 1: codex is a single client; parallel N splits ctx into N slots.
+# --jinja: required for the Qwen chat templates + tool-call parsing.
+# --ctx-size: 49152 default — the size every accuracy number was measured at.
+#   LLAMA_CTX=98304 is measured SAFE on llama-server+Qwen3.8 (31.5 GB wired on
+#   a 48 GB machine, 2026-08-18; the old 96K kernel panic was MLX/LM Studio) but
+#   accuracy above 49152 is unmeasured, and pi's contextWindow in models.json
+#   must be raised to match or the extra room goes unused.
+# --parallel 1: pi is a single client; parallel N splits ctx into N slots.
 # --cache-type-k q8_0: halves K-cache memory; community-standard for agent work.

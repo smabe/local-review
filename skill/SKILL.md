@@ -1,6 +1,6 @@
 ---
 name: local-review
-description: Run a free, private code review on a local LLM (Qwen3-Coder-30B via LM Studio or llama-server) using the pi agent harness. Advisory pre-pass only — it never replaces the real review gate. Use when the user asks for a local review, a free second opinion on a diff, or offline review.
+description: Run a free, private code review on a local LLM (Qwen3.8-27B no-think via llama-server by default; Qwen3-Coder-30B on LM Studio as the small-diff fast tier) using the pi agent harness. Advisory pre-pass only — it never replaces the real review gate. Use when the user asks for a local review, a free second opinion on a diff, or offline review.
 ---
 
 # local-review — code review on a local model
@@ -11,10 +11,11 @@ uncorrelated with a cloud reviewer's; it does NOT replace one.
 ## Run it
 
 ```bash
-cd <repo>
-scripts/llama_server.sh    # serve the default reviewer first (:8080)
-scripts/review.sh
-scripts/review.sh --intent "<one sentence>"
+# LR = the local-review checkout, or its ~/.claude/skills/local-review install
+cd <repo with uncommitted changes>
+"$LR"/scripts/llama_server.sh    # serve the default reviewer first (:8080)
+"$LR"/scripts/review.sh
+"$LR"/scripts/review.sh --intent "<one sentence>"
 ```
 
 That is the whole happy path. The script checks the preconditions, assembles
@@ -108,8 +109,12 @@ claims you have not checked against the source.
   kills long single generations around 11K tokens regardless of free RAM.
   Capped rounds keep every response under the threshold; `maxTokens: 8192` is
   the second line of defense. llama-server does not have this problem.
-- **Context stays at 49152.** Pushing toward 96K+ wired ~35GB and
-  kernel-panicked a 48GB machine. Keep LM Studio guardrails on Strict.
+- **Context sizing is a suggestion.** 49152 is the accuracy-measured default.
+  llama-server + Qwen3.8 at 96K measured 31.5GB wired peak (2026-08-18):
+  `LLAMA_CTX=98304 "$LR"/scripts/llama_server.sh` plus a matching `contextWindow`
+  in `~/.pi/agent/models.json`; accuracy above 49152 is unmeasured and full-window prefill runs ~8 min. Our one
+  96K attempt on MLX/LM Studio wired ~35GB and kernel-panicked the machine,
+  so we keep MLX at 49152 and its guardrails on Strict.
 - **This reviews DIFFS.** Pointed at committed files with no diff to anchor on,
   it produced 7/7 false positives, mostly from treating independent components
   as one pipeline. A whole-file audit needs ~150 tokens of design context in
@@ -144,7 +149,7 @@ claims you have not checked against the source.
 
 ## Engines
 
-llama-server is the default engine: `scripts/llama_server.sh` serves the
+llama-server is the default engine: `"$LR"/scripts/llama_server.sh` serves the
 reviewer GGUF on :8080 (Qwen3.8, thinking disabled — the measured
 configuration) and owns the model for the life of the process; zero crashes
 observed across the whole experiment. LM Studio (MLX) is the fast tier:
