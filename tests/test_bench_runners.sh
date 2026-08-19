@@ -664,6 +664,11 @@ cp "$ROOT/bench/summarize_ctx_tiers.py" "$ROOT/bench/watch_ctx_tiers.py" "$FX/"
     printf 'label\tcase\trun\texit\texpected\tsecs\tnfind\tfound\tfound_any\tstatus\tdate\tsha\tvsurv\tvtotal\n'
     printf 'legacy-arm\toffbyone\t1\t4\t4\t100\t2\t1\t1\n'
     printf 'new-arm\toffbyone\t1\t4\t4\t120\t3\t1\t1\t\t2026-08-19\tabc123def456\t1\t3\n'
+    # A kill mid-append. The runners deliberately leave this line in place
+    # rather than rewriting evidence, so every reader has to survive it —
+    # without the guard, r["run"] raises and the live monitor dies at every
+    # refresh for the whole rest of the arm.
+    printf 'torn-arm'
 } > "$FX/results.tsv"
 
 cat > "$FX/read_mixed.py" <<'PY'
@@ -679,6 +684,8 @@ NEW = ("status", "date", "sha", "vsurv", "vtotal")
 for mod in (summarize, watch):
     name = mod.__name__
     rows = mod.read_tsv(fixture)
+    # Three lines, two rows: the torn one carries no key and is dropped rather
+    # than handed on as a dict with no "run" in it.
     assert len(rows) == 2, f"{name}: read {len(rows)} rows, expected 2"
     legacy, new = rows
     # The pre-existing fields still resolve, unshifted, from a narrow row.
@@ -898,6 +905,35 @@ if [ "$(wc -l < "$LOCKB_TSV" | tr -d ' ')" = "2" ]; then ok; else bad "a lock-re
 if [ "$(field "$LOCKB_TSV" 2 9)" = "LOCKED" ]; then ok; else bad "bigdiff terminal row status is '$(field "$LOCKB_TSV" 2 9)', expected LOCKED"; fi
 if [ "$(field "$LOCKB_TSV" 2 2)" = "abort" ]; then ok; else bad "bigdiff terminal row's run is '$(field "$LOCKB_TSV" 2 2)', expected 'abort'"; fi
 
+# --- a dead LM Studio is infrastructure too ----------------------------------
+
+# probe_server only covers llamaserver: LM Studio does not serve the endpoint it
+# curls, so an lmstudio arm's reachability check lives inside review.sh and
+# reaches the runner only as a stderr signature. Without one, a dead LM Studio
+# falls through to SUSPECT, writes a full arm of rows and exits 0 — and under
+# resume those rows claim their keys permanently, so the documented "re-run the
+# identical command" recovery dispatches nothing at all.
+WS="$TMP/infra-lmstudio"
+relocate run_eval.sh "$WS"
+cp "$TMP/stub-infra.sh" "$WS/scripts/review.sh"
+(
+    export STUB_MARKER="$WS/dispatched.txt"
+    export STUB_ERR="$(sig_line run_eval.sh SIG_LMSTUDIO ':1234 -- run: lms server start')" STUB_RC=1
+    export LOCAL_REVIEW_EVAL_CASES="offbyone"
+    bash "$WS/bench/run_eval.sh" lmstudio stub-model 2 lms-label
+) > "$WS/driver.log" 2>&1
+rc=$?
+LMS_TSV="$WS/bench/results.tsv"
+
+if [ "$rc" -eq "$INFRA_RC" ]; then ok; else bad "a batch against a dead LM Studio exited $rc, expected the infrastructure code $INFRA_RC"; fi
+if [ "$(wc -l < "$LMS_TSV" | tr -d ' ')" = "2" ]; then
+    ok
+else
+    bad "a dead-LM-Studio batch wrote $(( $(wc -l < "$LMS_TSV") - 1 )) rows, expected exactly one terminal row"
+fi
+if [ "$(field "$LMS_TSV" 2 10)" = "SERVER-DOWN" ]; then ok; else bad "a dead LM Studio recorded status='$(field "$LMS_TSV" 2 10)', expected SERVER-DOWN"; fi
+if [ "$(field "$LMS_TSV" 2 3)" = "abort" ]; then ok; else bad "the LM Studio terminal row's run is '$(field "$LMS_TSV" 2 3)', expected 'abort'"; fi
+
 # --- server down at batch start: nothing dispatched, nothing recorded --------
 
 # Port 1 is never listening, so the probe fails without needing a torn-down
@@ -1049,7 +1085,7 @@ if [ -f "$ROOT/scripts/review.sh" ]; then
     _pats="$TMP/sig-patterns.txt"
     : > "$_pats"
     for _r in run_eval.sh run_bigdiff.sh; do
-        for _v in SIG_AUDIT SIG_SERVER SIG_LOCK; do
+        for _v in SIG_AUDIT SIG_SERVER SIG_LMSTUDIO SIG_LOCK; do
             printf '%s\t%s\t%s\n' "$_r" "$_v" "$(sig_of "$_r" "$_v")" >> "$_pats"
         done
     done
@@ -1619,6 +1655,450 @@ if grep -q 'run_verify.sh' "$ROOT/bench/run_ctx_tiers.sh"; then
     bad "run_ctx_tiers.sh now references run_verify.sh; its unset list must gain that runner's knobs"
 else
     ok
+fi
+
+# --- resume: RUNS means "ensure N rows exist for this key" -------------------
+
+# An arm interrupted at run 7 of 10 used to need an invented continuation label
+# and a hand reconciliation of two labels at scoring time. Re-running the
+# IDENTICAL command now finishes it in place. The skip predicate is plain
+# key-existence, which is only sound because a row exists iff the run reached
+# the model — the invariant phases `infra-status` and `verify-runner` put in
+# place and the assertions above pin.
+
+# dispatches <marker> — how many times the stub was invoked, 0 when it never was.
+dispatches() {
+    if [ -f "$1" ]; then grep -c '^RUN$' "$1"; else echo 0; fi
+}
+
+# --- the gap, and only the gap, is filled ------------------------------------
+
+WS="$TMP/resume-gap"
+relocate run_eval.sh "$WS"
+cp "$TMP/stub-infra.sh" "$WS/scripts/review.sh"
+(
+    export STUB_MARKER="$WS/dispatched.txt" STUB_ERR="$EVAL_FOOTER"
+    export LOCAL_REVIEW_EVAL_CASES="offbyone swallow"
+    bash "$WS/bench/run_eval.sh" stub-provider stub-model 1 gap-label
+) > "$WS/first.log" 2>&1
+rc=$?
+GAP_TSV="$WS/bench/results.tsv"
+if [ "$rc" -eq 0 ]; then ok; else bad "the first half of a resumable arm exited $rc (see $WS/first.log)"; fi
+if [ "$(dispatches "$WS/dispatched.txt")" = "2" ]; then ok; else bad "the first half dispatched $(dispatches "$WS/dispatched.txt") runs, expected 2"; fi
+
+# Same command, larger RUNS: runs 1 of both cases are on disk, runs 2 are not.
+(
+    export STUB_MARKER="$WS/dispatched.txt" STUB_ERR="$EVAL_FOOTER"
+    export LOCAL_REVIEW_EVAL_CASES="offbyone swallow"
+    bash "$WS/bench/run_eval.sh" stub-provider stub-model 2 gap-label
+) > "$WS/second.log" 2>&1
+rc=$?
+if [ "$rc" -eq 0 ]; then ok; else bad "the resuming batch exited $rc (see $WS/second.log)"; fi
+if [ "$(dispatches "$WS/dispatched.txt")" = "4" ]; then
+    ok
+else
+    bad "a resumed arm dispatched $(dispatches "$WS/dispatched.txt") runs in total, expected 4 (2 + the 2 missing)"
+fi
+if [ "$(wc -l < "$GAP_TSV" | tr -d ' ')" = "5" ]; then
+    ok
+else
+    bad "a resumed arm holds $(( $(wc -l < "$GAP_TSV") - 1 )) rows, expected 4:
+$(cat "$GAP_TSV")"
+fi
+if grep -q '2 of 4 already recorded, dispatching 2' "$WS/second.log"; then
+    ok
+else
+    bad "the resuming batch did not report what it was skipping:
+$(cat "$WS/second.log")"
+fi
+# No duplicate keys: (case, run) is unique across the whole label.
+_dupes=$(awk -F'\t' 'NR>1 {k = $2 "/" $3; if (k in seen) print k; seen[k] = 1}' "$GAP_TSV")
+if [ -z "$_dupes" ]; then ok; else bad "resume produced duplicate keys: $_dupes"; fi
+
+# --- re-running a complete arm is a no-op that says so -----------------------
+
+(
+    export STUB_MARKER="$WS/dispatched.txt" STUB_ERR="$EVAL_FOOTER"
+    export LOCAL_REVIEW_EVAL_CASES="offbyone swallow"
+    bash "$WS/bench/run_eval.sh" stub-provider stub-model 2 gap-label
+) > "$WS/third.log" 2>&1
+rc=$?
+if [ "$rc" -eq 0 ]; then ok; else bad "re-running a complete arm exited $rc (see $WS/third.log)"; fi
+if [ "$(dispatches "$WS/dispatched.txt")" = "4" ]; then ok; else bad "re-running a complete arm dispatched more runs"; fi
+if [ "$(wc -l < "$GAP_TSV" | tr -d ' ')" = "5" ]; then ok; else bad "re-running a complete arm appended rows"; fi
+if grep -q '4 of 4 already recorded, dispatching 0' "$WS/third.log"; then
+    ok
+else
+    bad "re-running a complete arm did not say it had nothing to do:
+$(cat "$WS/third.log")"
+fi
+
+# --- a smaller RUNS warns rather than printing a clean nothing ---------------
+
+(
+    export STUB_MARKER="$WS/dispatched.txt" STUB_ERR="$EVAL_FOOTER"
+    export LOCAL_REVIEW_EVAL_CASES="offbyone swallow"
+    bash "$WS/bench/run_eval.sh" stub-provider stub-model 1 gap-label
+) > "$WS/fourth.log" 2>&1
+if [ "$(dispatches "$WS/dispatched.txt")" = "4" ]; then ok; else bad "a smaller RUNS dispatched something"; fi
+if grep -q 'more than the 2 requested' "$WS/fourth.log"; then
+    ok
+else
+    bad "RUNS=1 against a 2-run arm did not warn that more rows exist than were asked for:
+$(cat "$WS/fourth.log")"
+fi
+
+# --- nothing is ever auto-retried --------------------------------------------
+
+# Every marker is a terminal OBSERVATION. Selectively re-sampling the failures
+# converts a failure rate into a success rate, and it is not hypothetical:
+# docs/rounds-experiment.md:49 counts one exit-3 no-verdict run inside the r6
+# arm's composition, load-bearing in a shipped FAIL verdict.
+WS="$TMP/resume-terminal"
+relocate run_eval.sh "$WS"
+cp "$TMP/stub-infra.sh" "$WS/scripts/review.sh"
+# The header is the one a runner actually wrote, never retyped; the seeded rows
+# carry an EMPTY sha, which is also the shape of all 385 historical rows.
+{
+    head -1 "$GAP_TSV"
+    printf 'term-label\toffbyone\t1\t4\t4\t100\t1\t1\t1\tEMPTY-LOG\t2026-08-19\t\t\t\n'
+    printf 'term-label\tswallow\t1\t4\t4\t100\t1\t1\t1\tSCORE-ERROR\t2026-08-19\t\t\t\n'
+    printf 'term-label\tboolean\t1\t137\t4\t100\t0\t0\t0\tSUSPECT\t2026-08-19\t\t\t\n'
+    printf 'term-label\tleak\t1\t124\t4\t900\t0\t0\t0\t\t2026-08-19\t\t\t\n'
+} > "$WS/bench/results.tsv"
+(
+    export STUB_MARKER="$WS/dispatched.txt" STUB_ERR="$EVAL_FOOTER"
+    export LOCAL_REVIEW_EVAL_CASES="offbyone swallow boolean leak"
+    bash "$WS/bench/run_eval.sh" stub-provider stub-model 1 term-label
+) > "$WS/driver.log" 2>&1
+rc=$?
+if [ "$rc" -eq 0 ]; then ok; else bad "a fully-recorded terminal arm exited $rc (see $WS/driver.log)"; fi
+if [ "$(dispatches "$WS/dispatched.txt")" = "0" ]; then
+    ok
+else
+    bad "a terminal marker was retried: $(dispatches "$WS/dispatched.txt") run(s) dispatched over EMPTY-LOG / SCORE-ERROR / SUSPECT / exit=124"
+fi
+if [ "$(wc -l < "$WS/bench/results.tsv" | tr -d ' ')" = "5" ]; then ok; else bad "a terminal arm gained rows"; fi
+
+# --- the terminal abort row is not a dispatchable key ------------------------
+
+# The assertion the whole phase rests on. An aborted batch must not poison the
+# key it failed on forever, which is the #1-vs-#2 deadlock this workstream
+# exists to dissolve — and it is achieved by the row's SHAPE, with no status
+# inspection anywhere in the resume path.
+WS="$TMP/resume-abortrow"
+relocate run_eval.sh "$WS"
+cp "$TMP/stub-infra.sh" "$WS/scripts/review.sh"
+{
+    head -1 "$GAP_TSV"
+    printf 'ab-label\t\tabort\t1\t\t0\t0\t0\t0\tSERVER-DOWN\t2026-08-19\t\t\t\n'
+} > "$WS/bench/results.tsv"
+(
+    export STUB_MARKER="$WS/dispatched.txt" STUB_ERR="$EVAL_FOOTER"
+    export LOCAL_REVIEW_EVAL_CASES="offbyone"
+    bash "$WS/bench/run_eval.sh" stub-provider stub-model 1 ab-label
+) > "$WS/driver.log" 2>&1
+if [ "$(dispatches "$WS/dispatched.txt")" = "1" ]; then
+    ok
+else
+    bad "a terminal abort row occupied a dispatchable key: $(dispatches "$WS/dispatched.txt") run(s) dispatched, expected 1"
+fi
+
+# --- a torn final line is corruption, not a completed key --------------------
+
+WS="$TMP/resume-torn"
+relocate run_eval.sh "$WS"
+cp "$TMP/stub-infra.sh" "$WS/scripts/review.sh"
+{
+    head -1 "$GAP_TSV"
+    printf 'torn-label\toffbyone\t1\t4\t4\t100\t1\t1\t1\t\t2026-08-19\t\t\t\n'
+    printf 'torn-label\tswallow'
+} > "$WS/bench/results.tsv"
+(
+    export STUB_MARKER="$WS/dispatched.txt" STUB_ERR="$EVAL_FOOTER"
+    export LOCAL_REVIEW_EVAL_CASES="offbyone swallow"
+    bash "$WS/bench/run_eval.sh" stub-provider stub-model 1 torn-label
+) > "$WS/driver.log" 2>&1
+TORN_TSV="$WS/bench/results.tsv"
+if [ "$(dispatches "$WS/dispatched.txt")" = "1" ]; then
+    ok
+else
+    bad "a torn line was read as a completed key: $(dispatches "$WS/dispatched.txt") run(s) dispatched, expected 1"
+fi
+if grep -q 'truncated' "$WS/driver.log"; then ok; else bad "the torn line was skipped silently:
+$(cat "$WS/driver.log")"; fi
+# Nothing may be glued onto the torn line's tail: that would turn two damaged
+# records into one plausible-looking wide one.
+_glued=$(awk -F'\t' 'NR==1{h=NF; next} NF>h{print NR}' "$TORN_TSV")
+if [ -z "$_glued" ]; then ok; else bad "the new row was appended onto the torn line (wide lines: $_glued)"; fi
+if [ "$(nfields "$TORN_TSV" "$(wc -l < "$TORN_TSV" | tr -d ' ')")" = "$(nfields "$TORN_TSV" 1)" ]; then
+    ok
+else
+    bad "the row appended after a torn line is not full width:
+$(cat "$TORN_TSV")"
+fi
+
+# --- the provenance guard ----------------------------------------------------
+
+# Resume automates continuing an arm across a gap in which the script, the
+# prompt, the model and the context size may all have changed — the 2026-08-19
+# cross-session misattribution turned into an automatic behaviour.
+WS="$TMP/resume-prov"
+relocate run_eval.sh "$WS"
+cp "$TMP/stub-infra.sh" "$WS/scripts/review.sh"
+{
+    head -1 "$GAP_TSV"
+    printf 'prov-label\toffbyone\t1\t4\t4\t100\t1\t1\t1\t\t2026-08-19\tdeadbeefcafe\t\t\n'
+} > "$WS/bench/results.tsv"
+(
+    export STUB_MARKER="$WS/dispatched.txt" STUB_ERR="$EVAL_FOOTER"
+    export LOCAL_REVIEW_EVAL_CASES="offbyone"
+    bash "$WS/bench/run_eval.sh" stub-provider stub-model 2 prov-label
+) > "$WS/driver.log" 2>&1
+rc=$?
+if [ "$rc" -eq 2 ]; then ok; else bad "a batch resuming over a different script's rows exited $rc, expected the do-not-resume 2"; fi
+if [ "$(dispatches "$WS/dispatched.txt")" = "0" ]; then ok; else bad "the provenance guard fired but still dispatched a run"; fi
+if [ "$(wc -l < "$WS/bench/results.tsv" | tr -d ' ')" = "2" ]; then ok; else bad "the provenance guard appended a row"; fi
+if grep -q 'deadbeefcafe' "$WS/driver.log"; then
+    ok
+else
+    bad "the provenance refusal did not name the sha already on disk:
+$(cat "$WS/driver.log")"
+fi
+# A batch refused before it dispatches anything leaves no snapshot behind: a
+# copy on disk is what asserts that a batch reached dispatch.
+snapshots "$WS/bench/logs"
+if [ "$SNAP_N" = "0" ]; then ok; else bad "a provenance-refused batch left $SNAP_N snapshot(s) behind"; fi
+
+# The terminal abort row is not a measurement, so the sha it carries is not
+# evidence that this label was measured by another script. Counting it would
+# refuse a label on which nothing ever ran — the poisoned-key deadlock this
+# workstream exists to dissolve, back at label granularity.
+WS="$TMP/resume-prov-abort"
+relocate run_eval.sh "$WS"
+cp "$TMP/stub-infra.sh" "$WS/scripts/review.sh"
+{
+    head -1 "$GAP_TSV"
+    printf 'ab-prov\t\tabort\t1\t\t0\t0\t0\t0\tSERVER-DOWN\t2026-08-19\tdeadbeefcafe\t\t\n'
+} > "$WS/bench/results.tsv"
+(
+    export STUB_MARKER="$WS/dispatched.txt" STUB_ERR="$EVAL_FOOTER"
+    export LOCAL_REVIEW_EVAL_CASES="offbyone"
+    bash "$WS/bench/run_eval.sh" stub-provider stub-model 1 ab-prov
+) > "$WS/driver.log" 2>&1
+rc=$?
+if [ "$rc" -eq 0 ]; then ok; else bad "a label whose only row is an abort marker was refused by the provenance guard (exit $rc)"; fi
+if [ "$(dispatches "$WS/dispatched.txt")" = "1" ]; then
+    ok
+else
+    bad "an abort row's sha blocked a label on which nothing was ever measured: $(dispatches "$WS/dispatched.txt") dispatched, expected 1"
+fi
+
+# A MISSING sha is never a signal. All 385 rows written before the column
+# existed have none, and treating absence as a mismatch bricks resume on the
+# whole corpus the day it ships.
+WS="$TMP/resume-prov-empty"
+relocate run_eval.sh "$WS"
+cp "$TMP/stub-infra.sh" "$WS/scripts/review.sh"
+{
+    head -1 "$GAP_TSV"
+    printf 'hist-label\toffbyone\t1\t4\t4\t100\t1\t1\t1\n'
+} > "$WS/bench/results.tsv"
+(
+    export STUB_MARKER="$WS/dispatched.txt" STUB_ERR="$EVAL_FOOTER"
+    export LOCAL_REVIEW_EVAL_CASES="offbyone"
+    bash "$WS/bench/run_eval.sh" stub-provider stub-model 2 hist-label
+) > "$WS/driver.log" 2>&1
+rc=$?
+if [ "$rc" -eq 0 ]; then ok; else bad "resume over a pre-provenance row exited $rc (see $WS/driver.log)"; fi
+if [ "$(dispatches "$WS/dispatched.txt")" = "1" ]; then
+    ok
+else
+    bad "a historical row without a sha was not treated as a recorded key: $(dispatches "$WS/dispatched.txt") dispatched, expected 1"
+fi
+
+# --- the results-file lock ---------------------------------------------------
+
+# Resume reads the very file it is about to append to, so two batches racing on
+# one results file both compute the same missing set and both dispatch it.
+WS="$TMP/resume-lock"
+relocate run_eval.sh "$WS"
+cp "$TMP/stub-infra.sh" "$WS/scripts/review.sh"
+head -1 "$GAP_TSV" > "$WS/bench/results.tsv"
+mkdir -p "$WS/bench/results.tsv.lock"
+printf '%s\n' "$$" > "$WS/bench/results.tsv.lock/pid"
+(
+    export STUB_MARKER="$WS/dispatched.txt" STUB_ERR="$EVAL_FOOTER"
+    export LOCAL_REVIEW_EVAL_CASES="offbyone"
+    bash "$WS/bench/run_eval.sh" stub-provider stub-model 1 lock-race
+) > "$WS/held.log" 2>&1
+rc=$?
+if [ "$rc" -eq "$INFRA_RC" ]; then ok; else bad "a batch blocked by a live results lock exited $rc, expected $INFRA_RC"; fi
+if [ "$(dispatches "$WS/dispatched.txt")" = "0" ]; then ok; else bad "a lock-blocked batch dispatched a run anyway"; fi
+if [ "$(wc -l < "$WS/bench/results.tsv" | tr -d ' ')" = "1" ]; then
+    ok
+else
+    bad "a lock-blocked batch wrote to the results file it could not claim:
+$(cat "$WS/bench/results.tsv")"
+fi
+if grep -q "$$" "$WS/held.log"; then ok; else bad "the lock refusal did not name the holder:
+$(cat "$WS/held.log")"; fi
+
+# Nothing reclaims a lock it did not create: a directory whose owner is gone is
+# a SIGKILL or a power cut, and clearing it is a deliberate human act.
+rm -f "$WS/bench/results.tsv.lock/pid"
+(
+    export STUB_MARKER="$WS/dispatched.txt" STUB_ERR="$EVAL_FOOTER"
+    export LOCAL_REVIEW_EVAL_CASES="offbyone"
+    bash "$WS/bench/run_eval.sh" stub-provider stub-model 1 lock-race
+) > "$WS/stale.log" 2>&1
+rc=$?
+if [ "$rc" -eq "$INFRA_RC" ]; then ok; else bad "a batch facing a stale results lock exited $rc, expected $INFRA_RC"; fi
+if [ -d "$WS/bench/results.tsv.lock" ]; then ok; else bad "a batch reclaimed a results lock it did not create"; fi
+if grep -q 'rm -rf' "$WS/stale.log"; then ok; else bad "the stale-lock refusal did not say how to clear it:
+$(cat "$WS/stale.log")"; fi
+
+# And a normal batch releases what it took, so the next one is not blocked.
+rm -rf "$WS/bench/results.tsv.lock"
+(
+    export STUB_MARKER="$WS/dispatched.txt" STUB_ERR="$EVAL_FOOTER"
+    export LOCAL_REVIEW_EVAL_CASES="offbyone"
+    bash "$WS/bench/run_eval.sh" stub-provider stub-model 1 lock-race
+) > "$WS/free.log" 2>&1
+rc=$?
+if [ "$rc" -eq 0 ]; then ok; else bad "an unlocked batch exited $rc (see $WS/free.log)"; fi
+if [ ! -e "$WS/bench/results.tsv.lock" ]; then ok; else bad "a finished batch left its results lock behind"; fi
+
+# --- run_bigdiff.sh: the key check precedes the log rotation -----------------
+
+# The check's POSITION in the loop, asserted through its consequence. Placed
+# after the rotation it moves the transcript aside for every row it then skips,
+# and rescore_bigdiff.py reports "no usable log" for the whole resumed arm —
+# destroying the durable evidence while adding a feature meant to protect it.
+BIGSTUB_OUT='FILE: store.py:1 | confidence: high
+QUOTE: import json
+DEFECT: the import is wrong
+FAILURE: callers see nothing'
+WS="$TMP/resume-rotate"
+relocate run_bigdiff.sh "$WS"
+cp "$TMP/stub-infra.sh" "$WS/scripts/review.sh"
+(
+    export STUB_MARKER="$WS/dispatched.txt" STUB_ERR="$BIG_FOOTER" STUB_OUT="$BIGSTUB_OUT"
+    bash "$WS/bench/run_bigdiff.sh" stub-provider stub-model 1 rot-label
+) > "$WS/first.log" 2>&1
+rc=$?
+ROT_LOG="$WS/bench/logs/rot-label-bigdiff-r1.txt"
+if [ "$rc" -eq 0 ]; then ok; else bad "the first bigdiff batch exited $rc (see $WS/first.log)"; fi
+cp "$ROT_LOG" "$WS/r1-before.txt"
+(
+    export STUB_MARKER="$WS/dispatched.txt" STUB_ERR="$BIG_FOOTER" STUB_OUT="$BIGSTUB_OUT"
+    bash "$WS/bench/run_bigdiff.sh" stub-provider stub-model 2 rot-label
+) > "$WS/second.log" 2>&1
+rc=$?
+if [ "$rc" -eq 0 ]; then ok; else bad "the resuming bigdiff batch exited $rc (see $WS/second.log)"; fi
+if [ "$(dispatches "$WS/dispatched.txt")" = "2" ]; then ok; else bad "the resumed bigdiff arm dispatched $(dispatches "$WS/dispatched.txt") runs in total, expected 2"; fi
+_rotated=$(find "$WS/bench/logs" -name 'rot-label-bigdiff-r1.txt.prev.*')
+if [ -z "$_rotated" ]; then ok; else bad "the skipped run's transcript was rotated aside: $_rotated"; fi
+if cmp -s "$ROT_LOG" "$WS/r1-before.txt"; then ok; else bad "the skipped run's transcript was rewritten"; fi
+
+# --- run_verify.sh resumes on (label, item, run) -----------------------------
+
+WS="$TMP/resume-verify"
+relocate_verify "$WS" f1-stalecomment-misattr f5-offbyone-guard
+(
+    export PATH="$TMP/pidir:$PATH"
+    export PI_TEXT='VERDICT: refuted\nREASON: stub'
+    export PI_MARKER="$WS/dispatched.txt"
+    bash "$WS/bench/run_verify.sh" stub-provider stub-model 1 vfy-resume
+) > "$WS/first.log" 2>&1
+rc=$?
+if [ "$rc" -eq 0 ]; then ok; else bad "the first verify batch exited $rc (see $WS/first.log)"; fi
+(
+    export PATH="$TMP/pidir:$PATH"
+    export PI_TEXT='VERDICT: refuted\nREASON: stub'
+    export PI_MARKER="$WS/dispatched.txt"
+    bash "$WS/bench/run_verify.sh" stub-provider stub-model 2 vfy-resume
+) > "$WS/second.log" 2>&1
+rc=$?
+VRS_TSV="$WS/bench/results-verify.tsv"
+if [ "$rc" -eq 0 ]; then ok; else bad "the resuming verify batch exited $rc (see $WS/second.log)"; fi
+if [ "$(dispatches "$WS/dispatched.txt")" = "4" ]; then
+    ok
+else
+    bad "the resumed verify arm invoked pi $(dispatches "$WS/dispatched.txt") times in total, expected 4 (2 + the 2 missing)"
+fi
+if [ "$(wc -l < "$VRS_TSV" | tr -d ' ')" = "5" ]; then ok; else bad "the resumed verify arm holds $(( $(wc -l < "$VRS_TSV") - 1 )) rows, expected 4"; fi
+# Two ITEMS under one run number: the key is (label, item, run), so item is
+# load-bearing and a (label, run) key would skip the second item of every run.
+_vitems=$(awk -F'\t' 'NR>1 && $3=="1" {print $2}' "$VRS_TSV" | sort | tr '\n' ' ')
+if [ "$_vitems" = "f1-stalecomment-misattr f5-offbyone-guard " ]; then
+    ok
+else
+    bad "run 1 of the verify arm recorded items '$_vitems', expected both"
+fi
+
+# --- end to end: killed mid-batch, resumed by the identical command ----------
+
+# The stub TERMs the batch during run 2, which is what an external kill looks
+# like — run 1 is on disk, run 2 reached the model but was never recorded, run 3
+# never started. The recovery is the same command again.
+WS="$TMP/resume-e2e"
+relocate run_bigdiff.sh "$WS"
+cp "$ROOT/bench/rescore_bigdiff.py" "$WS/bench/rescore_bigdiff.py"
+cat > "$WS/scripts/review.sh" <<'KILLSTUB'
+#!/usr/bin/env bash
+echo RUN >> "$STUB_MARKER"
+printf '%s\n' "$STUB_OUT"
+printf '%s\n' "$STUB_ERR" >&2
+if [ "$(grep -c '^RUN$' "$STUB_MARKER")" -eq 2 ]; then
+  kill -TERM "$(cat "$STUB_BATCH_PID")"
+  sleep 5
+fi
+exit 4
+KILLSTUB
+(
+    export STUB_MARKER="$WS/dispatched.txt" STUB_ERR="$BIG_FOOTER" STUB_OUT="$BIGSTUB_OUT"
+    export STUB_BATCH_PID="$WS/batch.pid"
+    bash "$WS/bench/run_bigdiff.sh" stub-provider stub-model 3 e2e-label &
+    _bp=$!
+    printf '%s\n' "$_bp" > "$WS/batch.pid"
+    wait "$_bp"
+    printf 'batch rc=%s\n' "$?"
+) > "$WS/first.log" 2>&1
+E2E_TSV="$WS/bench/results-bigdiff.tsv"
+
+if [ "$(wc -l < "$E2E_TSV" | tr -d ' ')" = "2" ]; then
+    ok
+else
+    bad "the killed batch left $(( $(wc -l < "$E2E_TSV") - 1 )) rows, expected only run 1's:
+$(cat "$E2E_TSV")"
+fi
+# A batch that dies on anything short of SIGKILL releases its lock, or the
+# documented recovery — re-run the identical command — is blocked by the very
+# interruption this feature exists to survive.
+if [ ! -e "$E2E_TSV.lock" ]; then ok; else bad "a TERMed batch left its results lock behind, blocking the resume it exists for"; fi
+
+(
+    export STUB_MARKER="$WS/dispatched.txt" STUB_ERR="$BIG_FOOTER" STUB_OUT="$BIGSTUB_OUT"
+    export STUB_BATCH_PID="$WS/batch.pid"
+    bash "$WS/bench/run_bigdiff.sh" stub-provider stub-model 3 e2e-label
+) > "$WS/second.log" 2>&1
+rc=$?
+if [ "$rc" -eq 0 ]; then ok; else bad "the resuming batch exited $rc (see $WS/second.log)"; fi
+if [ "$(wc -l < "$E2E_TSV" | tr -d ' ')" = "4" ]; then
+    ok
+else
+    bad "the resumed arm holds $(( $(wc -l < "$E2E_TSV") - 1 )) rows, expected 3:
+$(cat "$E2E_TSV")"
+fi
+_e2eruns=$(awk -F'\t' 'NR>1 {print $2}' "$E2E_TSV" | sort | tr '\n' ' ')
+if [ "$_e2eruns" = "1 2 3 " ]; then ok; else bad "the resumed arm's run numbers are '$_e2eruns', expected '1 2 3 ' — nothing may be renumbered"; fi
+if python3 "$WS/bench/rescore_bigdiff.py" --check > "$WS/rescore.txt" 2>&1 \
+   && grep -q '^0 row(s) would change' "$WS/rescore.txt"; then
+    ok
+else
+    bad "a resumed arm does not survive a rescore round trip:
+$(cat "$WS/rescore.txt")"
 fi
 
 # --- the harness never writes into the real bench/ ---------------------------

@@ -82,12 +82,70 @@ python3 bench/rescore_bigdiff.py [--check]  # rebuild stored rows from the saved
 `run_ctx_tiers.sh` is the only one that touches shared state: it rewrites
 `contextWindow` in `~/.pi/agent/models.json`, serves at a matching `LLAMA_CTX`,
 asserts the served `n_ctx_slot` is what was asked for, samples wired memory
-throughout, and restores `models.json` from an EXIT trap. Set
-`LOCAL_REVIEW_ARM_SUITES=bigdiff` (or `eval`) to complete an arm that only got
-half-finished, rather than re-running the half that already produced valid rows.
+throughout, and restores `models.json` from an EXIT trap.
 
 Both fixture repos (`eval-repo/`, `bigdiff-repo/`) are gitignored and bootstrap
 on first use. Both runners skip that bootstrap if the repo already exists.
+
+### Resuming an interrupted arm: run the identical command again
+
+`RUNS` means **"ensure N rows exist for this key"**, not "dispatch N runs". A
+batch killed at run 7 of 10 is finished by re-running the exact same command —
+no continuation label, no duplicate keys, no reconciling two labels at scoring
+time. Each runner reports what it is about to do before it dispatches anything:
+
+```
+run_eval.sh: my-arm-label: 6 of 10 already recorded, dispatching 4
+```
+
+The key is `(label, case, run)` for the small cases, `(label, run)` for big-diff
+and `(label, item, run)` for the verifier probe, read out of the header **by
+name** so a future column cannot shift it. The skip predicate is that key
+existing, and nothing else — no `status` is consulted anywhere in the resume
+path. That works only because of the invariant the rest of this file describes:
+a row exists **if and only if** the run reached the model, and the one terminal
+row an abort writes reserves the non-numeric `run` value `abort`, so it can
+never occupy a key.
+
+Three rules fall out of that, and each one costs something to get wrong:
+
+- **Nothing is ever auto-retried.** `EMPTY-LOG`, `SCORE-ERROR`, `SUSPECT`,
+  `TIMEOUT`, exit 3 and exit 124 are terminal *observations*, not gaps.
+  Re-sampling the failures of an arm converts a failure rate into a success
+  rate. A `SCORE-ERROR` row is repaired by `rescore_bigdiff.py` from the saved
+  transcript, which costs no GPU time and keeps the original observation.
+- **Nothing is renumbered.** Run numbers are not attempt ids:
+  `watch_ctx_tiers.py` iterates a fixed `range(1, RUNS+1)`, so a retry parked at
+  run 3 of a two-run arm is invisible to the watcher.
+- **A smaller `RUNS` deletes nothing** and says so, rather than reporting
+  success for a run it did not make.
+
+**Provenance guard.** Resuming spans a gap in which the script, the prompt, the
+model and the context tier may all have changed. Before dispatching, a batch
+compares the `sha` already recorded for its label against the one it is about to
+run, and refuses (exit `2`) when they differ — naming both values. A **missing**
+`sha` is never a mismatch: every row written before that column existed has
+none, and the guard would otherwise brick resume on the whole historical corpus.
+The answer to a refusal is a new label, not a flag.
+
+**One batch at a time per results file.** Each runner takes a `mkdir`-based lock
+on `<results file>.lock` for the length of the batch — the same protocol
+`review.sh` uses for the model, for the same reason: resume reads the very file
+it is about to append to, so two batches racing on one file compute the same
+missing set and both dispatch it. A second batch refuses cleanly with exit `75`
+and writes no row. **Nothing reclaims a lock it did not create**: every death
+short of `kill -9` releases it, so a leftover directory is a hard kill or a
+power cut, and clearing it (`rm -rf bench/results.tsv.lock`) is a deliberate
+human act. The refusal says so.
+
+**`LOCAL_REVIEW_ARM_SUITES` is the coarse version of this and is now the second
+choice.** It skips a whole suite of a `run_ctx_tiers.sh` arm; row-level resume
+skips exactly the runs that already have rows, which is a superset of what that
+knob buys. Reach for it only to run *one* suite of an arm deliberately — for
+example to re-serve a tier and collect big-diff rows alone. To finish an arm
+that was interrupted, re-run `run_ctx_tiers.sh` with the identical arguments and
+let both suites resume; the snapshot it keys on the label is reused, so the two
+halves still measure one script and the provenance guard stays quiet.
 
 ### The reviewed script is frozen per batch
 
@@ -107,9 +165,10 @@ under one label would re-measure the first batch's script.
 
 `run_ctx_tiers.sh` takes **one** snapshot and exports `LOCAL_REVIEW_SH` over it,
 so both suites in an arm measure the same copy. It keys that copy on the label
-and **reuses it** when it is already there, so finishing a half-done arm with
-`LOCAL_REVIEW_ARM_SUITES` measures the script the arm started with rather than
-today's — it says so on stderr when it does.
+and **reuses it** when it is already there, so finishing a half-done arm
+measures the script the arm started with rather than today's — it says so on
+stderr when it does. That reuse is also what keeps the provenance guard quiet on
+a resumed arm: every row under one label carries one `sha`.
 
 Setting `LOCAL_REVIEW_SH` yourself pins any other script: a batch that finds it
 already set uses that path as-is, takes no snapshot, and does not own its
@@ -174,7 +233,7 @@ row means what it says.
   | value | meaning | row written |
   |---|---|---|
   | *(empty)* | a clean measurement — every other cell means what it says | per run |
-  | `SERVER-DOWN` | nothing answered the reachability probe | **one terminal row, batch aborts** |
+  | `SERVER-DOWN` | nothing answered the reachability probe, or `review.sh` refused because LM Studio's server was down | **one terminal row, batch aborts** |
   | `LOCKED` | another local review holds the model | **one terminal row, batch aborts** |
   | `EMPTY-LOG` | the run finished but its transcript is empty | per run |
   | `SCORE-ERROR` | the transcript exists and `score_bigdiff.py` crashed on it | per run |
@@ -243,14 +302,20 @@ Distinct from the `exit` column, which is `review.sh`'s.
 | code | meaning | what to do |
 |---|---|---|
 | `0` | the batch ran to the end | read the rows |
-| `2` | refused before dispatch — unknown case name, drifted fixture marker, unappliable patch, no working checksum tool | **do not resume**; the fixture or the environment is invalid and re-running changes nothing |
-| `75` | infrastructure — the server stopped answering, or another review holds the model. Exactly one terminal row was appended and nothing else was recorded | fix the cause and **re-run the identical command** |
+| `2` | refused before dispatch — unknown case name, drifted fixture marker, unappliable patch, no working checksum tool, or rows already recorded under this label that were measured with a different script | **do not resume**; the fixture, the environment or the label is invalid and re-running the same command changes nothing |
+| `75` | infrastructure — the server stopped answering, another review holds the model, or another batch holds this results file. Nothing was recorded beyond at most one terminal row | fix the cause and **re-run the identical command** |
 
 `75` is `EX_TEMPFAIL` from `sysexits.h`, chosen so that "retryable" and "do not
 retry" can never be confused for one another. `run_ctx_tiers.sh` stops the whole
 arm on one: the server a `75` reports is the one it serves itself, so running
 the second suite into it would either add a second terminal row under one label
 or half-complete an arm whose recovery is to re-run the identical command.
+
+The results-file lock is the one `75` that writes **no** row at all. Everywhere
+else a `75` means "the arm stopped, and here is the row that says so"; there,
+the process holding the lock is writing that label's rows right now, and a row
+claiming the arm aborted would be a false statement about a run that is going
+fine.
 
 `rescore_bigdiff.py` clears `EMPTY-LOG` and `SCORE-ERROR` from a row it
 successfully re-scores — those describe the scoring, and re-scoring is what
@@ -262,6 +327,12 @@ reserved token `abort` in `run`, and an empty `case` / `item`. That shape is
 deliberate: it is not a dispatchable key, so a batch that aborts on one case
 does not permanently occupy it, and a resume that skips keys already recorded
 never mistakes an abort for a completed run.
+
+The probe only covers **llamaserver** — LM Studio does not serve the endpoint it
+curls. A dead LM Studio is therefore seen only through `review.sh`'s own
+refusal, which the classifier carries as a second server signature; without it a
+dead LM Studio would write a full arm of `SUSPECT` rows and exit 0, and those
+rows would then claim their keys against any resume.
 
 **The probe proves that a port answers, and nothing more.** It does not prove
 the labelled model is the one loaded, that the served context is the one the

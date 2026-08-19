@@ -38,6 +38,15 @@ def read_tsv(path):
         # zip truncates to the shorter side, so a narrow row maps every name it
         # does have correctly and simply omits the rest.
         row = dict(zip(head, l.split("\t")))
+        # A line too short to carry a key is a kill mid-append, not a row: the
+        # runners deliberately leave it in place rather than rewriting evidence
+        # (bench/README.md, resume). Without this every reader below dies on
+        # r["run"] -- and this one runs at the end of every arm.
+        if "label" not in row or "run" not in row:
+            sys.stderr.write(f"{path.name}: dropping a truncated line "
+                             f"({len(row)} field(s)) -- a batch killed "
+                             f"mid-append\n")
+            continue
         for name in NEW_COLUMNS:
             row.setdefault(name, "")
         rows.append(row)

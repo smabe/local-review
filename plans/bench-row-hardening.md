@@ -508,6 +508,52 @@ plus one worktree prober that built phase `snapshot` for real.
   rows out before any reader sees them; `results-verify.tsv` has no reader at
   all, so nothing would catch it. **Phase 5 should apply the same test** to any
   cell it pads.
+- **2026-08-19 (resume).** The sub-plan says to ignore "any line whose field
+  count differs from the header's". Taken literally that drops every one of the
+  385 pre-provenance rows, which are all legitimately narrower — and it would
+  make the provenance guard's own missing-`sha` carve-out unreachable, since
+  those rows would never be read at all. Implemented instead as the rule the
+  schema phase actually locked (`NF <= header NF`): a line is dropped, loudly,
+  only when it is WIDER than the header or SHORT OF THE KEY COLUMNS. Narrower
+  but keyable is normal and silent.
+- **2026-08-19 (resume).** Resume needed a results-file lock, and a lock needs
+  releasing, so all three runners now carry an EXIT trap plus `trap 'exit 130'
+  INT` / `trap 'exit 143' TERM` — mirrored from `scripts/review.sh:209-223`.
+  Verified on bash 3.2 that a `( )` subshell and a `$( )` command substitution
+  both RESET the EXIT trap, so the many watchdog subshells cannot release the
+  lock mid-batch (measured, not assumed). The INT/TERM traps are what make
+  "nothing reclaims a lock it did not create" affordable: without them every
+  externally-killed batch — the exact case resume exists for — would leave a
+  stale directory blocking its own recovery.
+- **2026-08-19 (resume).** Two bugs found by `/code-review` on this phase that
+  are NOT resume bugs but which resume promotes from noise to data loss, both
+  fixed here. (1) `probe_server` only covers llamaserver, and none of the three
+  `SIG_*` patterns matched `review.sh:154`'s LM Studio refusal — so a dead LM
+  Studio wrote a full arm of `SUSPECT` rows and exited 0, and under resume those
+  rows claim their keys forever. Added `SIG_LMSTUDIO`, tied to the same drift
+  check. (2) `read_tsv` in `summarize_ctx_tiers.py` and `watch_ctx_tiers.py`
+  raised `KeyError` on the torn final line this phase deliberately preserves;
+  both now drop it with a warning, matching `rescore_bigdiff.py`'s existing
+  guard. Those two Python files are outside this phase's Files touched and are
+  edited anyway, because the alternative was shipping a documented row shape
+  that kills the live monitor at every refresh.
+- **2026-08-19 (resume).** Still not extracted, and this was the last phase that
+  opens all three runners: `review_sha()`, `classify_run()`, `abort_infra()`,
+  `probe_server()`, the `SIG_*` set and now `scan_recorded()` / `recorded()` /
+  `provenance_guard()` are hand-copied across them. **File it as its own
+  change** — the scope is a sourced `bench/` helper plus the matching change to
+  `relocate()` in `tests/test_bench_runners.sh`, which is the reason no phase
+  has been able to do it in passing. What holds it together meanwhile is the
+  drift test over the `SIG_*` patterns and the fact that every copy is now
+  exercised behaviourally by the second gate.
+- **2026-08-19 (resume).** Two things `/code-review` surfaced that are left for
+  a follow-up, both outside anything this phase touches. `EMPTY-LOG` is listed
+  in `rescore_bigdiff.py`'s `SCORING_MARKERS` but is unreachable: every path
+  producing it also makes the rescore bail before scoring, so it can never be
+  cleared, while `bench/README.md` says it is. And `review.sh:270`'s "failed to
+  load $MODEL" refusal has no signature either — same class as the LM Studio one
+  fixed above, but it needs a new `status` value and a README vocabulary entry,
+  which is a design decision rather than a peer of an existing pattern.
 - **2026-08-19 (schema).** A batch that cannot checksum its script exits **2**,
   reusing the existing "refused before dispatch, nothing recorded" code rather
   than inventing one. Phase 3 introduces a distinct infrastructure exit code and

@@ -176,6 +176,41 @@ probe_server() {
 }
 
 mkdir -p "$EVAL_DIR/logs"
+
+# --- one batch at a time per results file -------------------------------------
+#
+# Identical in shape and reasoning to the other two runners, which carry the
+# full commentary: resume reads the very file it appends to, so two batches
+# racing on one results file both compute the same missing set and both dispatch
+# it. `mkdir` is the entire protocol (scripts/review.sh:210), nothing reclaims a
+# lock it did not create, and the INT/TERM traps are what make that affordable.
+RESULTS_LOCK="$RESULTS.lock"
+LOCK_HELD=""
+# Every branch a full `if`: bash adopts the trap's LAST command status.
+release_lock() {
+  if [ -n "$LOCK_HELD" ]; then rm -rf "$LOCK_HELD"; fi
+}
+trap release_lock EXIT
+# Nothing may interrupt between creating the directory and recording that we own
+# it: the EXIT trap can only remove a lock it can see.
+trap '' INT TERM
+if ! mkdir "$RESULTS_LOCK" 2>/dev/null; then
+  trap 'exit 130' INT; trap 'exit 143' TERM
+  _owner=$(cat "$RESULTS_LOCK/pid" 2>/dev/null || true)
+  if [ -n "$_owner" ] && kill -0 "$_owner" 2>/dev/null; then
+    echo "run_verify.sh: another batch (pid $_owner) is appending to $RESULTS -- wait for it to finish, then re-run the identical command." >&2
+  else
+    echo "run_verify.sh: a results lock is present but its owner is gone. If no batch is running: rm -rf \"$RESULTS_LOCK\"" >&2
+  fi
+  # No terminal row: the process holding the lock is writing that label's rows
+  # right now, and a row claiming the arm aborted would be a false statement
+  # about a run that is going fine.
+  exit "$INFRA_EXIT"
+fi
+LOCK_HELD="$RESULTS_LOCK"
+trap 'exit 130' INT; trap 'exit 143' TERM
+printf '%s\n' "$$" > "$RESULTS_LOCK/pid" || echo "run_verify.sh: could not record the lock owner pid" >&2
+
 if [ ! -d "$REPO/.git" ]; then
   mkdir -p "$REPO"; cp "$EVAL_DIR"/base/*.py "$REPO/"
   git -C "$REPO" init -q; git -C "$REPO" add -A
@@ -183,8 +218,146 @@ if [ ! -d "$REPO/.git" ]; then
 fi
 [ -f "$RESULTS" ] || printf 'label\titem\trun\tverdict\ttruth\tgating\tsecs\tagree\tstatus\tdate\tsha\n' > "$RESULTS"
 
+# --- resume: RUNS means "ensure N rows exist for this key" --------------------
+#
+# Identical in shape and reasoning to the other two runners, which carry the
+# full commentary, over the key (label, item, run). `item` is load-bearing in
+# that key: 13 items share every run number, so a (label, run) key would skip
+# twelve of them. The skip predicate is key-existence and nothing else -- a row
+# exists iff the run reached the model, the terminal abort row reserves a
+# non-numeric `run`, and every marker (including this runner's own TIMEOUT) is a
+# terminal observation that is never re-sampled.
+NL='
+'
+KSEP=$(printf '\t')   # a TSV cell cannot contain one, so joined keys cannot collide
+RECORDED=""
+RECORDED_N=0
+
+# A kill during an append leaves a final line with no newline; appending to it
+# would glue the next row onto its tail. The short line itself stays -- it is
+# corruption, not a completed key.
+if [ -s "$RESULTS" ] && [ -n "$(tail -c 1 "$RESULTS")" ]; then
+  echo "run_verify.sh: $RESULTS does not end in a newline (a batch killed mid-append) -- starting the next row on a fresh line" >&2
+  printf '\n' >> "$RESULTS"
+fi
+
+# scan_recorded COLUMN... -- fill RECORDED / RECORDED_N from $RESULTS. Columns
+# are addressed BY NAME so a later widening cannot silently re-key this; a row
+# wider than the header or cut short of the key columns is dropped loudly, while
+# one merely narrower than the header is a pre-provenance row and is silent.
+scan_recorded() {
+  RECORDED=$(awk -F'\t' -v label="$LABEL" -v cols="$*" -v sep="$KSEP" \
+                 -v runner="run_verify.sh" -v f="$RESULTS" '
+    NR == 1 {
+      hn = NF
+      for (i = 1; i <= NF; i++) idx[$i] = i
+      nw = split(cols, want, " ")
+      for (i = 1; i <= nw; i++) {
+        if (!(want[i] in idx)) {
+          print runner ": " f " has no `" want[i] "` column -- refusing to resume" > "/dev/stderr"
+          bad = 1
+          exit
+        }
+        if (idx[want[i]] > keymax) keymax = idx[want[i]]
+      }
+      next
+    }
+    NF > hn {
+      print runner ": " f " line " NR " has " NF " fields against a " hn "-column header -- ignored" > "/dev/stderr"
+      next
+    }
+    NF < keymax {
+      print runner ": " f " line " NR " is truncated (" NF " field(s)) -- ignored, and its key will be re-run" > "/dev/stderr"
+      next
+    }
+    $(idx["label"]) != label { next }
+    $(idx["run"]) !~ /^[0-9]+$/ { next }
+    {
+      key = $(idx[want[1]])
+      for (i = 2; i <= nw; i++) key = key sep $(idx[want[i]])
+      print key
+    }
+    END { if (bad) exit 2 }
+  ' "$RESULTS") || exit 2
+  if [ -n "$RECORDED" ]; then
+    RECORDED_N=$(printf '%s\n' "$RECORDED" | wc -l | tr -d ' ')
+  else
+    RECORDED_N=0
+  fi
+}
+
+# recorded KEYPART... -- is this key already on disk?
+recorded() {
+  _k="$1"; shift
+  while [ "$#" -gt 0 ]; do _k="$_k$KSEP$1"; shift; done
+  case "$NL$RECORDED$NL" in
+    *"$NL$_k$NL"*) return 0 ;;
+  esac
+  return 1
+}
+
+# provenance_guard -- refuse to extend an arm measured with a different version
+# of this script than this batch runs. The artifact under measurement here is
+# the verifier prompt inside this file, so a reworded prompt is exactly the
+# mismatch worth refusing. A MISSING sha is never a signal: every row written
+# before the column existed has none.
+provenance_guard() {
+  awk -F'\t' -v label="$LABEL" -v sha="$RUN_SHA" \
+             -v runner="run_verify.sh" -v f="$RESULTS" '
+    NR == 1 {
+      hn = NF
+      for (i = 1; i <= NF; i++) idx[$i] = i
+      if (!("label" in idx) || !("run" in idx) || !("sha" in idx)) {
+        print runner ": " f " has no label/run/sha column -- refusing to resume" > "/dev/stderr"
+        bad = 1
+        exit
+      }
+      next
+    }
+    NF > hn || NF < idx["sha"] { next }
+    $(idx["label"]) != label { next }
+    # The terminal abort row is not a measurement, so its sha is not evidence
+    # that this label was measured by another version of this script.
+    $(idx["run"]) !~ /^[0-9]+$/ { next }
+    $(idx["sha"]) == "" || $(idx["sha"]) == sha { next }
+    { seen[$(idx["sha"])] = 1 }
+    END {
+      if (bad) exit 2
+      n = 0
+      for (s in seen) { n++; list = list (n > 1 ? ", " : "") s }
+      if (n) {
+        print runner ": " label " already carries rows from a different version of this script (" list "); this batch runs " sha "." > "/dev/stderr"
+        print runner ": resuming would mix two prompt versions under one label -- use a new label, or move the old rows aside." > "/dev/stderr"
+        exit 2
+      }
+    }
+  ' "$RESULTS"
+}
+
+provenance_guard || exit 2
+
+scan_recorded label item run
+# Walked over the same key space the item loop below does -- the same glob, so
+# the report cannot drift from what is actually dispatched.
+_want=0; _have=0
 for run in $(seq 1 "$RUNS"); do
   for dir in "$EVAL_DIR"/verify/items/*/; do
+    _want=$((_want + 1))
+    if recorded "$LABEL" "$(basename "$dir")" "$run"; then _have=$((_have + 1)); fi
+  done
+done
+echo "run_verify.sh: $LABEL: $_have of $_want already recorded, dispatching $((_want - _have))" >&2
+if [ "$RECORDED_N" -gt "$_want" ]; then
+  echo "run_verify.sh: $LABEL: $RECORDED_N row(s) already recorded, more than the $_want requested -- RUNS never deletes rows." >&2
+fi
+
+for run in $(seq 1 "$RUNS"); do
+  for dir in "$EVAL_DIR"/verify/items/*/; do
+    # FIRST in the body, before the probe and before the fixture is applied: a
+    # key already on disk costs this batch nothing, and probing for a key nobody
+    # will dispatch could abort a complete arm on a server it never needed.
+    if recorded "$LABEL" "$(basename "$dir")" "$run"; then continue; fi
+
     # Before the fixture is applied, before a log exists, before anything is
     # dispatched: an attempt refused here must leave no artifact that could be
     # mistaken for a run, and no per-item row at all.

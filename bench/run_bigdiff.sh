@@ -38,8 +38,12 @@ PROVIDER="$1"; MODEL="$2"; RUNS="${3:-1}"; LABEL="${4:?label required}"
 # `local-review: ` prefix its die helper adds, and none of the three is ever
 # retyped from memory -- tests/test_bench_runners.sh ties each back to a live
 # message in scripts/review.sh.
+# TWO server signatures for the same reason as there: probe_server covers only
+# llamaserver, so a dead LM Studio is visible ONLY through review.sh's own
+# refusal (scripts/review.sh:154).
 SIG_AUDIT='^local-review: audit: '
 SIG_SERVER='^local-review: no server answering at '
+SIG_LMSTUDIO='^local-review: LM Studio server is down on '
 SIG_LOCK='^local-review: another local review (pid '
 # EX_TEMPFAIL: nothing was measured and nothing recorded, so re-running the
 # identical command is the fix. Deliberately not the existing exit 2, which
@@ -57,6 +61,7 @@ classify_run() {
   if [ "$1" -eq 124 ]; then return 0; fi
   if grep -q "$SIG_AUDIT" "$2" 2>/dev/null; then return 0; fi
   if grep -q "$SIG_SERVER" "$2" 2>/dev/null; then printf 'SERVER-DOWN'; return 0; fi
+  if grep -q "$SIG_LMSTUDIO" "$2" 2>/dev/null; then printf 'SERVER-DOWN'; return 0; fi
   if grep -q "$SIG_LOCK" "$2" 2>/dev/null; then printf 'LOCKED'; return 0; fi
   printf 'SUSPECT'
 }
@@ -92,6 +97,42 @@ probe_server() {
 
 mkdir -p "$EVAL_DIR/logs"
 
+# --- one batch at a time per results file -------------------------------------
+#
+# Identical in shape and reasoning to run_eval.sh, which carries the full
+# commentary: resume reads the very file it appends to, so two batches racing on
+# one results file both compute the same missing set and both dispatch it. The
+# protocol is `mkdir` and nothing else (scripts/review.sh:210), nothing reclaims
+# a lock it did not create, and the INT/TERM traps are what make that rule
+# affordable. Taken before the snapshot so a blocked batch leaves no copy
+# asserting it reached dispatch.
+RESULTS_LOCK="$RESULTS.lock"
+LOCK_HELD=""
+# Every branch a full `if`: bash adopts the trap's LAST command status.
+release_lock() {
+  if [ -n "$LOCK_HELD" ]; then rm -rf "$LOCK_HELD"; fi
+}
+trap release_lock EXIT
+# Nothing may interrupt between creating the directory and recording that we own
+# it: the EXIT trap can only remove a lock it can see.
+trap '' INT TERM
+if ! mkdir "$RESULTS_LOCK" 2>/dev/null; then
+  trap 'exit 130' INT; trap 'exit 143' TERM
+  _owner=$(cat "$RESULTS_LOCK/pid" 2>/dev/null || true)
+  if [ -n "$_owner" ] && kill -0 "$_owner" 2>/dev/null; then
+    echo "run_bigdiff.sh: another batch (pid $_owner) is appending to $RESULTS -- wait for it to finish, then re-run the identical command." >&2
+  else
+    echo "run_bigdiff.sh: a results lock is present but its owner is gone. If no batch is running: rm -rf \"$RESULTS_LOCK\"" >&2
+  fi
+  # No terminal row: the process holding the lock is writing that label's rows
+  # right now, and a row claiming the arm aborted would be a false statement
+  # about a run that is going fine.
+  exit "$INFRA_EXIT"
+fi
+LOCK_HELD="$RESULTS_LOCK"
+trap 'exit 130' INT; trap 'exit 143' TERM
+printf '%s\n' "$$" > "$RESULTS_LOCK/pid" || echo "run_bigdiff.sh: could not record the lock owner pid" >&2
+
 # Snapshot the reviewed script, identical in shape to run_eval.sh (which carries
 # the full reasoning): checksum first so a batch that cannot record its script
 # version leaves no copy behind, then one frozen copy per BATCH -- never per run,
@@ -116,6 +157,8 @@ if [ -n "${LOCAL_REVIEW_SH:-}" ]; then
   # suites). Use it as-is: do not re-snapshot, do not own its lifetime -- and so
   # this batch cannot promise the pinned file is frozen; whoever set it owns that.
   REVIEW_RUN="$REVIEW_SRC"
+  # Not ours to delete on a later refusal; whoever pinned it owns its lifetime.
+  SNAPSHOT_OWNED=""
   REVIEW_SHA=$(review_sha "$REVIEW_RUN") || exit 2
   echo "run_bigdiff.sh: pinned review script $REVIEW_RUN (sha256 $REVIEW_SHA)" >&2
 else
@@ -128,6 +171,9 @@ else
   # Checksum the COPY, never the source: a save landing between the cp and the
   # hash would stamp this batch with a version the executed bytes do not have.
   REVIEW_SHA=$(review_sha "$REVIEW_RUN") || { rm -f "$REVIEW_RUN"; exit 2; }
+  # Ours, so a refusal below has to take it with it -- a snapshot on disk is
+  # what asserts that a batch reached dispatch.
+  SNAPSHOT_OWNED="$REVIEW_RUN"
   # KEPT: this path is what bash names in a syntax error, so it must outlive the
   # batch for the .err beside it to be readable.
   echo "run_bigdiff.sh: snapshot $REVIEW_RUN (sha256 $REVIEW_SHA) of $REVIEW_SRC" >&2
@@ -147,7 +193,142 @@ fi
 
 [ -f "$RESULTS" ] || printf 'label\trun\texit\tsecs\tnfind\thits\tother\tbugs\tstatus\tdate\tsha\tvsurv\tvtotal\n' > "$RESULTS"
 
+# --- resume: RUNS means "ensure N rows exist for this key" --------------------
+#
+# Identical in shape and reasoning to run_eval.sh, which carries the full
+# commentary, over the key (label, run) rather than (label, case, run). The skip
+# predicate is key-existence and nothing else -- a row exists iff the run
+# reached the model, the terminal abort row reserves a non-numeric `run`, and
+# every marker is a terminal observation that is never re-sampled.
+NL='
+'
+KSEP=$(printf '\t')   # a TSV cell cannot contain one, so joined keys cannot collide
+RECORDED=""
+RECORDED_N=0
+
+# A kill during an append leaves a final line with no newline; appending to it
+# would glue the next row onto its tail. The short line itself stays -- it is
+# corruption, not a completed key.
+if [ -s "$RESULTS" ] && [ -n "$(tail -c 1 "$RESULTS")" ]; then
+  echo "run_bigdiff.sh: $RESULTS does not end in a newline (a batch killed mid-append) -- starting the next row on a fresh line" >&2
+  printf '\n' >> "$RESULTS"
+fi
+
+# scan_recorded COLUMN... -- fill RECORDED / RECORDED_N from $RESULTS. Columns
+# are addressed BY NAME so a later widening cannot silently re-key this; a row
+# wider than the header or cut short of the key columns is dropped loudly, while
+# one merely narrower than the header is a pre-provenance row and is silent.
+scan_recorded() {
+  RECORDED=$(awk -F'\t' -v label="$LABEL" -v cols="$*" -v sep="$KSEP" \
+                 -v runner="run_bigdiff.sh" -v f="$RESULTS" '
+    NR == 1 {
+      hn = NF
+      for (i = 1; i <= NF; i++) idx[$i] = i
+      nw = split(cols, want, " ")
+      for (i = 1; i <= nw; i++) {
+        if (!(want[i] in idx)) {
+          print runner ": " f " has no `" want[i] "` column -- refusing to resume" > "/dev/stderr"
+          bad = 1
+          exit
+        }
+        if (idx[want[i]] > keymax) keymax = idx[want[i]]
+      }
+      next
+    }
+    NF > hn {
+      print runner ": " f " line " NR " has " NF " fields against a " hn "-column header -- ignored" > "/dev/stderr"
+      next
+    }
+    NF < keymax {
+      print runner ": " f " line " NR " is truncated (" NF " field(s)) -- ignored, and its key will be re-run" > "/dev/stderr"
+      next
+    }
+    $(idx["label"]) != label { next }
+    $(idx["run"]) !~ /^[0-9]+$/ { next }
+    {
+      key = $(idx[want[1]])
+      for (i = 2; i <= nw; i++) key = key sep $(idx[want[i]])
+      print key
+    }
+    END { if (bad) exit 2 }
+  ' "$RESULTS") || exit 2
+  if [ -n "$RECORDED" ]; then
+    RECORDED_N=$(printf '%s\n' "$RECORDED" | wc -l | tr -d ' ')
+  else
+    RECORDED_N=0
+  fi
+}
+
+# recorded KEYPART... -- is this key already on disk?
+recorded() {
+  _k="$1"; shift
+  while [ "$#" -gt 0 ]; do _k="$_k$KSEP$1"; shift; done
+  case "$NL$RECORDED$NL" in
+    *"$NL$_k$NL"*) return 0 ;;
+  esac
+  return 1
+}
+
+# provenance_guard -- refuse to extend an arm measured with a different script
+# than this batch runs. A MISSING sha is never a signal: every row written
+# before the column existed has none.
+provenance_guard() {
+  awk -F'\t' -v label="$LABEL" -v sha="$REVIEW_SHA" \
+             -v runner="run_bigdiff.sh" -v f="$RESULTS" '
+    NR == 1 {
+      hn = NF
+      for (i = 1; i <= NF; i++) idx[$i] = i
+      if (!("label" in idx) || !("run" in idx) || !("sha" in idx)) {
+        print runner ": " f " has no label/run/sha column -- refusing to resume" > "/dev/stderr"
+        bad = 1
+        exit
+      }
+      next
+    }
+    NF > hn || NF < idx["sha"] { next }
+    $(idx["label"]) != label { next }
+    # The terminal abort row is not a measurement, so its sha is not evidence
+    # that this label was measured by another script.
+    $(idx["run"]) !~ /^[0-9]+$/ { next }
+    $(idx["sha"]) == "" || $(idx["sha"]) == sha { next }
+    { seen[$(idx["sha"])] = 1 }
+    END {
+      if (bad) exit 2
+      n = 0
+      for (s in seen) { n++; list = list (n > 1 ? ", " : "") s }
+      if (n) {
+        print runner ": " label " already carries rows from a different script (" list "); this batch runs " sha "." > "/dev/stderr"
+        print runner ": resuming would mix two script versions under one label -- use a new label, or move the old rows aside." > "/dev/stderr"
+        exit 2
+      }
+    }
+  ' "$RESULTS"
+}
+
+if ! provenance_guard; then
+  if [ -n "$SNAPSHOT_OWNED" ]; then rm -f "$SNAPSHOT_OWNED"; fi
+  exit 2
+fi
+
+scan_recorded label run
+_want=0; _have=0
 for run in $(seq 1 "$RUNS"); do
+  _want=$((_want + 1))
+  if recorded "$LABEL" "$run"; then _have=$((_have + 1)); fi
+done
+echo "run_bigdiff.sh: $LABEL: $_have of $_want already recorded, dispatching $((_want - _have))" >&2
+if [ "$RECORDED_N" -gt "$_want" ]; then
+  echo "run_bigdiff.sh: $LABEL: $RECORDED_N row(s) already recorded, more than the $_want requested -- RUNS never deletes rows." >&2
+fi
+
+for run in $(seq 1 "$RUNS"); do
+  # FIRST in the body, and the position is the whole point: below the log
+  # rotation this would move the transcript aside for every row it then skips,
+  # and rescore_bigdiff.py would report "no usable log" for the entire resumed
+  # arm -- destroying the durable evidence while adding a feature meant to
+  # protect it.
+  if recorded "$LABEL" "$run"; then continue; fi
+
   # Before the fixture is reset, before a log exists, before anything is
   # dispatched: a refused attempt leaves no artifact and no per-run row.
   probe_server || abort_infra SERVER-DOWN ""
