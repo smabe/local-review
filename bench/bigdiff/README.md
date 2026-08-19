@@ -7,7 +7,9 @@ bugs — a cache cap that evicts the NEWEST entry (`cache.py`, `max(...ts)`),
 a v1→v2 migration whose return value is discarded (`serialize.py`), an
 export error path that returns 0 (`cli.py`) — plus, by accident, two real
 ones: the `import` command registered after the `__main__` guard, and
-export writing only the default namespace.
+export writing only the default namespace. A sixth real bug — the
+`rename_namespace` prefix match on an unvalidated `old` — was discovered
+2026-08-19 by a bench arm and adopted (`rename_prefix` in the scorer).
 
 Results (default settings, two runs per model; verdicts in `*-r*.txt`):
 
@@ -27,7 +29,7 @@ in `frontier-r1.txt` … `frontier-r4.txt` (a fifth run ignored its working
 directory and reviewed the harness instead; discarded — the method has a
 compliance failure mode a hermetic harness does not).
 
-All four runs: **4/5 known bugs, zero unmatched findings, ~50 s.** All caught
+All four runs: **4 of the (then) 5 known bugs, zero unmatched findings, ~50 s.** All caught
 the cache eviction; all missed the default-namespace export.
 
 Why this was run: the cache eviction (`max(...ts)` evicts the NEWEST entry) had

@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Score one bigdiff review transcript against the fixture's five known bugs.
+"""Score one bigdiff review transcript against the fixture's six known bugs.
 
 Prints a single line: "<hits> <other> <bug-ids|->" for run_bigdiff.sh to read.
 
 Scoring is by the QUOTE line, the same evidence the audit's own anti-fabrication
 gate uses -- a finding that does not quote the offending line is not a catch.
 "other" counts finding blocks matching no known bug; it is a fabrication
-CANDIDATE count, not a fabrication count, because the fixture is real code and a
-sixth real bug is possible. Read logs/ before calling one a fabrication.
+CANDIDATE count, not a fabrication count, because the fixture is real code and
+more real bugs are possible -- the sixth (rename_prefix) was exactly that,
+discovered by an arm 2026-08-19. Read logs/ before calling one a fabrication.
 """
 import re
 import sys
@@ -38,6 +39,19 @@ BUGS = [
                     or "unreachable" in b["body"].lower()
                     or "never" in b["body"].lower())),
     ("export_default_ns", ["for key in store.keys():"], None),
+    # Discovered (not planted) 2026-08-19 by the bold-finder arm and verified
+    # by live probe: rename_namespace validates SEP only in `new`, so an `old`
+    # containing SEP prefix-matches keys of a sibling namespace and moves them.
+    ("rename_prefix",
+     ["if SEP in new:", "old_prefix = old + SEP"],
+     # Falsifiable on purpose: rename_namespace can host other complaints (e.g.
+     # target-namespace overwrites) at these same lines. This bug is the
+     # unvalidated-`old` prefix match, so the body must discuss that.
+     lambda b: "store.py" in b["file"]
+               and "prefix" in b["body"].lower()
+               and ("match" in b["body"].lower()
+                    or "valid" in b["body"].lower()
+                    or "sibling" in b["body"].lower())),
     # `return 0` alone is ambiguous -- cmd_export ends with a CORRECT one and
     # cmd_keys/cmd_import carry more. Require the export path AND the error
     # context, so the correct trailing `return 0` (or an import-side finding
@@ -80,6 +94,11 @@ def blocks(text):
 
 def main():
     text = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+    # A --verify run appends a verification section that repeats each finding's
+    # FILE: line (with the verdict, without a QUOTE). Those are review.sh's own
+    # output, not findings -- parsing them inflated `other` by exactly the
+    # finding count until 2026-08-19. Score only the review above the marker.
+    text = text.split("--- verification (--verify) ---")[0]
     # An empty transcript is a run that has not finished (review.sh writes its
     # verdict at the end) or one that died. Scoring it as zero hits makes it
     # read identically to a clean review, which is the one confusion this

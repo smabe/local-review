@@ -86,7 +86,7 @@ def main():
         print("  none")
 
     print()
-    print("== bigdiff (18.3 KB, 5 known bugs) ==")
+    print("== bigdiff (18.3 KB, 6 known bugs since 2026-08-19) ==")
     print(f"{'arm':24} {'run':>4} {'exit':>5} {'secs':>6} {'nfind':>6} {'hits':>5} {'other':>6}  bugs")
     for label, _ in ARMS:
         for r in [x for x in big if x["label"] == label]:

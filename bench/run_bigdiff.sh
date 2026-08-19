@@ -4,14 +4,14 @@
 # The small-case bench (run_eval.sh) measures detection on one-bug diffs. This
 # one measures the failure that actually settled the default: a review that
 # comes back clean on a diff large enough to matter. Same watchdog discipline,
-# same TSV shape, different scoring — bigdiff carries five known bugs, so a run
+# same TSV shape, different scoring — bigdiff carries six known bugs, so a run
 # is scored by WHICH of them were quoted, plus a count of findings matching
 # none of them (fabrication candidates, to be read by hand in logs/).
 #
 # Appends TSV rows to results-bigdiff.tsv:
 #   label run exit secs nfind hits other bugs
 #     nfind  the audit's own validated finding count
-#     hits   how many of the five known bugs were quoted
+#     hits   how many of the six known bugs were quoted
 #     other  finding blocks matching no known bug (read the log before judging)
 #     bugs   comma-separated ids of the ones hit
 set -uo pipefail

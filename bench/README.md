@@ -37,19 +37,27 @@ verify arms from the logs (the `verify: N/M` stderr line and the VERDICT
 lines), never from the TSV alone. A verify-aware scorer is filed future work
 in docs/verify-flag.md.
 
+**Cross-era scoring note (2026-08-19):** the scorer gained the sixth bug and
+stopped parsing --verify echo sections on 2026-08-19, and `rescore_bigdiff.py`
+rebuilt every row with a usable log. Six early rows have no usable log and
+remain scored under the old five-bug rule (`qwen38-nothink-r6` r2 [pre-v7],
+`-purpose` r1, `-purpose-b` r3, `-anglSC-big` r1, `-vfy-big` r1, `-r6-b` r1) —
+their `hits`/`other` are not comparable across that boundary.
+
 **Big diff** (`bigdiff/`, 18.3 KB over seven files) measures whether attention
 survives volume — whether three real bugs still get found inside a plausible
 refactor, or whether the model pattern-matches "competent work" and returns
 clean. This is the suite that settled the default reviewer: Qwen3-Coder answers
 "No findings." on it twice in ~20 s.
 
-Five known bugs, three planted and two discovered during validation and adopted:
+Six known bugs: three planted, two discovered during validation and adopted, and a sixth discovered 2026-08-19 by the bold-finder arm (verified by live probe) and adopted:
 
 | id | file | the defect |
 |---|---|---|
 | `cache_evict` | cache.py | `victim = max(self._entries, key=...ts)` evicts the NEWEST entry; a cap must evict the oldest (`min`). The cache pins its oldest entries forever and thrashes on everything current |
 | `migrate_discard` | serialize.py | `_migrate_v1(payload["data"])` return value thrown away; the function returns a new dict rather than mutating, so v1 data flows out unmigrated |
 | `export_exit0` | cli.py | `cmd_export`'s `except OSError` returns 0. The sibling `cmd_import` returns 1 for the same case, which is the tell |
+| `rename_prefix` | store.py | `rename_namespace` validates the `:` separator only in `new`; an `old` containing `:` prefix-matches a sibling namespace's keys and silently moves them out | the discovered-not-planted bug; proof more real bugs can exist in the fixture |
 | `import_after_guard` | cli.py | `COMMANDS["import"] = cmd_import` sits below `if __name__ == "__main__"`, so the process exits before registration — the whole import command is dead code |
 | `export_default_ns` | cli.py | `store.keys()` with no namespace, defaulting to `"default"`, while the docstring promises every record. `cmd_keys` directly above it passes the namespace correctly |
 

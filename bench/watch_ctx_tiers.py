@@ -103,7 +103,7 @@ def big_verdict(row):
         return RED, "FALSE CLEAN" if row["exit"] == "0" else "0 known bugs"
     colour = GREEN if other == 0 else YELLOW
     tail = f", {other} unmatched" if other else ""
-    return colour, f"{hits}/5 known bugs{tail}"
+    return colour, f"{hits}/6 known bugs{tail}"
 
 
 def render(started):

@@ -310,3 +310,11 @@ qwen38-nothink-vfy-sc-b	stalecomment	1	1	0	0	0	0	0
 qwen38-nothink-vfy-b2	offbyone	1	4	4	248	1	1	1
 qwen38-nothink-vfy-b2	clean	1	0	0	43	0	0	0
 qwen38-nothink-vfy-sc-b2	stalecomment	1	4	0	127	1	1	1
+qwen38-nothink-bold	clean	1	0	0	63	0	0	0
+qwen38-nothink-bold	swallow	1	4	4	273	1	1	1
+qwen38-nothink-bold	offbyone	1	4	4	206	1	1	1
+qwen38-nothink-bold	boolean	1	4	4	126	1	1	1
+qwen38-nothink-bold	clean	2	0	0	72	0	0	0
+qwen38-nothink-bold	swallow	2	4	4	245	1	1	1
+qwen38-nothink-bold	offbyone	2	4	4	126	1	1	1
+qwen38-nothink-bold	boolean	2	4	4	181	1	1	1

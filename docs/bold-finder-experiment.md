@@ -1,4 +1,4 @@
-# Bold finder under --verify — pre-registered, results pending
+# Bold finder under --verify — MEASURED: no ship (a trade, not a gain)
 
 Status: registered 2026-08-19 BEFORE any run, per `docs/experiment-loop.md`.
 Wiring waits until the rounds bench (docs/rounds-experiment.md) releases the
@@ -59,6 +59,45 @@ Otherwise revert the wiring, keep everything, and record which stage failed
 (finder emitted nothing new vs verifier failed to filter) — the two failure
 modes point at different next hypotheses.
 
-## Measured results
+## Measured results (2026-08-19, qwen38-gguf-nothink @ 49152, llama-server)
 
-(pending)
+Small cases (bold + --verify, ×2): every condition met — clean 0/2 end-to-end,
+swallow/offbyone/boolean caught AND retained 2/2 each (swallow, historically
+flaky, went 2/2).
+
+Bigdiff, 5 runs per arm (labels split by `-b`/`-c` continuations after
+repeated external background-task kills; every counted run is a complete log):
+
+| bug | baseline (rounds-3, no verify) | bold + --verify |
+|---|---|---|
+| migrate_discard | 5/5 | 5/5 |
+| import_after_guard | 5/5 | 5/5 |
+| export_exit0 | 5/5 | 5/5 |
+| export_default_ns | 4/5 | 3/5 |
+| cache_evict | 2/5 | 3/5 |
+| unmatched survivors | n/a (no verifier) | 1 — hand-verified GENUINE (see below) |
+
+Two bold runs caught ALL FIVE planted bugs — unprecedented in the recorded
+history. And the bold finder DISCOVERED a sixth, unplanted, genuine bug:
+`rename_namespace` validates the separator only in `new`, so an `old`
+containing SEP prefix-matches a sibling namespace's keys and moves them
+(verified twice by live execution — by the verifier pass in-run and by hand
+during scoring). Adopted into `score_bigdiff.py` as `rename_prefix`.
+
+(TSV note: the `other` values first recorded for --verify rows were inflated
+by review.sh's verification echo — fixed in the scorer and rebuilt by
+`rescore_bigdiff.py` the same night; the rebuilt rows show other=0 across the
+bold arm except the genuine rename discovery, which now scores as a HIT under
+the adopted `rename_prefix` signature.)
+
+Decision rule outcome: FAIL on condition 3 — bold is not >= baseline on every
+bug (export_default_ns 3/5 vs 4/5), it traded that bug for cache_evict
+(3/5 vs 2/5). The rule refuses trades by design. Wiring REVERTED; the doc,
+labels, logs, and the adopted bug stay.
+
+What the failure actually looks like: not "finder found nothing new" and not
+"verifier failed to filter" (zero false survivors) — an attention trade at a
+fixed reading budget. A future hypothesis with its own registration could
+test bold at a higher generation budget, or a two-pass compose (default pass
+∪ bold pass) — composition of two full runs was angle-B's model and sidesteps
+the trade, at 2× cost.
