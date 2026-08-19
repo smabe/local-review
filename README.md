@@ -187,7 +187,22 @@ off-by-one and one deliberate-looking inconsistency:
 | bit the false-positive trap | 2/3 | 0/3 |
 | bogus claims on a docs-only diff | 0, 1, 3 | 0, 0, 0 |
 
-The two rules doing the work: **quote the exact offending line verbatim or
+Three personas now ship, each a full system prompt of its own, never a
+mode-flag on a shared one:
+
+- **The reviewer** (default, and under `--intent`): the measured
+  anti-fabrication scaffold below, plus the v7 purpose-anchored Method line
+  (docs/evict-gap.md).
+- **The stale-comment angle** (`--angle stalecomment`): the same scaffold
+  shape with rule 2 inverted — comments and docstrings the changed code
+  contradicts become the ONLY reportable class, anchored on the comment line
+  (docs/angle-stale-comment.md).
+- **The verifier** (`--verify`): given one finding, it must either construct
+  a refutation from the code — a quoted line, guard, or language rule — or
+  return "real"; unsure keeps the finding. Byte-identical between review.sh
+  and the bench, enforced by the test suite (docs/verifier-pass.md).
+
+The two rules doing the work in the reviewer scaffold: **quote the exact offending line verbatim or
 the defect does not exist**, and **prose and documentation cannot contain a
 defect**. Drop either and the fabrications come back.
 
@@ -265,6 +280,11 @@ someone else's stated intent.
 | `docs/angle-removed-behavior.md` | The removed-guard experiment behind the `removedguard` bench case |
 | `docs/experiment-loop.md` | the codified loop every reviewer change goes through: pre-registered hypothesis and decision rule, bench, ship or revert |
 | `docs/angle-stale-comment.md` | the stale-comment angle experiment: pre-registration, measured results, ship verdict |
+| `docs/angle-stale-removal.md` | removal-shaped staleness: the shipped angle covers it 3/3; the default pass reproduces the motivating miss |
+| `docs/verifier-pass.md` | the verifier capability probe: 14/14 retention, 8/8 refutation on a 13-item corpus |
+| `docs/verify-flag.md` | the `--verify` wiring: design, decision rule, post-ship hardening, measured results |
+| `docs/rounds-experiment.md` | `--rounds 6` on the big diff: no ship — the 3-round cap stands on merit |
+| `docs/bold-finder-experiment.md` | relaxing unsure-omit under `--verify`: no ship (a trade), and the discovered `rename_prefix` bug |
 | `scripts/llama_server.sh` | Serves a GGUF via llama-server on :8080 — the measured default reviewer when called bare, or any model you pass a path and flags for |
 | `scripts/local_review.py` | Legacy diff-pipe: posts a diff straight to the API, no agent loop. Only useful with *thinking* models, which review diffs well but are too slow to finish agentically. Do NOT use the coder model with it — diff-blind, it fabricates findings |
 | `scripts/test_local_review_scope.py` | Regression tests for the diff-pipe's review scope (untracked files, empty repos) |
