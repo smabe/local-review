@@ -20,7 +20,7 @@ gates a commit and never replaces a frontier-model review.
 ## Commands
 
 ```bash
-bash tests/test_local_review_audit.sh          # the suite (74 assertions); exit 0 = green
+bash tests/test_local_review_audit.sh          # the suite (84 assertions); exit 0 = green
 LOCAL_REVIEW_MIRROR=~/projects/abe-skills bash tests/test_local_review_audit.sh   # include the drift checks
 python3 scripts/test_local_review_scope.py     # legacy diff-pipe scope tests
 python3 scripts/test_local_review_scope.py DefaultScopeIncludesUntracked.test_empty_repo_falls_back_to_untracked_only   # one case
@@ -66,7 +66,8 @@ a failure that was measured, not anticipated:
    if this run is what loaded it.
 4. **Prompt assembly** — a reviewer system prompt replaces pi's default
    coding-assistant one, plus a round-capped user prompt and an optional intent
-   frame.
+   frame. An `--angle` run swaps in that angle's own single-class system prompt
+   instead of the shared scaffold (docs/angle-stale-comment.md).
 5. **The audit** — an inline Python heredoc parses pi's JSON event stream and
    decides the exit status. This is the part that must not be wrong.
 
@@ -147,6 +148,16 @@ Targets **bash 3.2** (macOS system bash): guard empty array expansion as
 `${a[@]+"${a[@]}"}` under `set -u`. In the EXIT trap every branch is a full `if`
 — bash adopts the trap's last command status, and a trailing failed test would
 rewrite a 0/3/4 into 1 and void the exit contract.
+
+## Changing the reviewer: the experiment loop
+
+Any change to the reviewer's prompt, pipeline, or model choice follows
+`docs/experiment-loop.md`: hypothesis and ship/revert rule pre-registered in a
+docs/ file before any run, benched through the real `review.sh`, scored by
+composition (which defects, not how many), researched online when results
+disappoint, then shipped or reverted per the pre-registered rule — fixture,
+doc, and bench rows kept either way. `docs/evict-gap.md` (shipped) and
+`docs/angle-removed-behavior.md` (reverted) are the exemplars.
 
 ## Peripheral files
 

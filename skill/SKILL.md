@@ -27,6 +27,7 @@ to get subtly wrong.
 |---|---|
 | `--intent "<sentence>"` | you made the change and can state its purpose — read the caveat below first |
 | `--rounds N` | default 3; raise to 4–5 when the review needs a codebase search pass |
+| `--angle stalecomment` | opt-in single-class pass for stale comments/docstrings the changed code contradicts — the class the default pass is banned from reporting. Replaces the general review for that run: run it in addition to the default pass, never instead (its exit 0 says nothing about correctness bugs). Anchors findings on the comment line; mutually exclusive with `--intent` |
 | `--json` | print pi's raw event stream instead of the review |
 | `--provider` / `--model` | switch engine/model — any id declared in `~/.pi/agent/models.json`, under `llamaserver` or `lmstudio`. E.g. `--provider lmstudio --model qwen/qwen3-coder-30b` for the ~5s fast tier on SMALL diffs (it false-cleans large ones) |
 

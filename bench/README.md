@@ -8,12 +8,15 @@ audit, the engine, and the exit contract, because those are what actually ship.
 
 ## The two suites
 
-**Small cases** (`cases/`, six of them) measure whether a specific defect class
+**Small cases** (`cases/`, seven of them) measure whether a specific defect class
 is found when the diff is small enough that nothing can hide. Five plant one bug
-each; `clean` is a genuinely clean refactor that measures fabrication. The
-default run covers the original five; `removedguard` runs via the
-`LOCAL_REVIEW_EVAL_CASES` override below (added 2026-08-18 for the angle-B
-experiment — `docs/angle-removed-behavior.md` — and kept as a fixture).
+each; `clean` is a genuinely clean refactor that measures fabrication; and
+`stalecomment` plants no code bug at all — its defect is a stale docstring over
+a correct, intended change. The default run covers the original five;
+`removedguard` and `stalecomment` run via the `LOCAL_REVIEW_EVAL_CASES`
+override below (`removedguard` added 2026-08-18 for the angle-B experiment —
+`docs/angle-removed-behavior.md`; `stalecomment` added the same day for the
+stale-comment angle that SHIPPED — `docs/angle-stale-comment.md`).
 
 | case | file | the defect | why it is here |
 |---|---|---|---|
@@ -23,6 +26,7 @@ experiment — `docs/angle-removed-behavior.md` — and kept as a fixture).
 | `leak` | store.py | `fh = open(path, "w")` with no close and no context manager | usually works under CPython refcounting, which is what makes it real |
 | `clean` | parser.py | nothing — `startswith("#")` becomes `line[0] in "#;"`, docstring updated to match | **the control.** Built to look dangerous (`line[0]` on an empty string) while being safe (`if not line` short-circuits first). Any finding here is a false positive |
 | `removedguard` | parser.py | a tidy `partition()` consolidation silently deletes the `if not key: raise` guard, so `"=value"` yields `{"": "value"}` instead of raising | the refactor-disguised removed guard; not in the default case list — run via `LOCAL_REVIEW_EVAL_CASES="removedguard"` |
+| `stalecomment` | parser.py | no code bug: duplicate keys switch from last-wins to first-wins (correct, intended), while the docstring still says "later duplicates win" | the stale-doc case. Scores only under `LOCAL_REVIEW_EVAL_CASES="stalecomment" LOCAL_REVIEW_EVAL_ARGS="--angle stalecomment"`; its meta `expected_exit=0` is calibrated for the DEFAULT pass (rule 2 bans the finding; measured 2/2, v7 instead misattributes the contradiction onto the correct code). The angle arm's success signature is exit 4 + `found=1`, scored by hand per docs/angle-stale-comment.md |
 
 **Big diff** (`bigdiff/`, 18.3 KB over seven files) measures whether attention
 survives volume — whether three real bugs still get found inside a plausible

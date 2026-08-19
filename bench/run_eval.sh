@@ -51,6 +51,14 @@ for run in $(seq 1 "$RUNS"); do
 
     git -C "$REPO" checkout -q -- .
     git -C "$REPO" apply "$EVAL_DIR/cases/$c/case.patch"
+    # Fail closed on a drifted marker, same reasoning as the case-name check:
+    # a marker no longer present in the patched repo (e.g. the base file's
+    # docstring was reworded) records found=0 on every run, and no log
+    # distinguishes that from a genuine model miss.
+    if [ -n "$marker" ] && ! grep -rqF --exclude-dir=.git -- "$marker" "$REPO"; then
+      echo "run_eval.sh: case '$c' marker not found in patched repo -- fixture drifted" >&2
+      exit 2
+    fi
 
     log="$EVAL_DIR/logs/$LABEL-$c-r$run.txt"
     t0=$(date +%s)

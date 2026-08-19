@@ -113,6 +113,10 @@ audit_is "echoed worked example"            3 3 'FILE: example/demo.py:12 | conf
 QUOTE: total =+ amount
 DEFECT: `=+` reassigns total to +amount instead of adding to it.
 FAILURE: Summing [5, 5] returns 5, not 10.'
+audit_is "echoed angle worked example"      3 3 'FILE: example/demo.py:3 | confidence: high
+QUOTE: # retries three times before giving up
+DEFECT: The comment claims three retries; the request below runs once with no retry.
+FAILURE: A reader trusting the comment ships code that breaks on the first transient error.'
 audit_is "quote with diff marker+backticks" 4 3 "FILE: $TMP/quotegate.py:2 | confidence: high
 QUOTE: \`+the_real_line  =  1\`
 DEFECT: assigns a constant where a computed value is required
@@ -222,8 +226,11 @@ src = open(sys.argv[1]).read()
 # The whole prompt section, not just the PROMPT= literal: OPENING and METHOD
 # are assembled above it, and a placeholder introduced there must be caught too.
 prompt = src[src.index('# --- prompt ---'):src.index('# --- run ---')]
-emitted = set(re.findall(r"<[^<>\n]+>", prompt))
-rejected = set(re.findall(r'"(<[^"]+>)"', src[src.index("PLACEHOLDERS = {"):]))
+# Two shapes the model measurably echoes: <...> placeholders, and the worked
+# examples' fake FILE paths (one per prompt variant) -- both must be rejected.
+emitted = set(re.findall(r"<[^<>\n]+>", prompt)) | set(re.findall(r"example/demo\.py:\d+", prompt))
+tail = src[src.index("PLACEHOLDERS = {"):]
+rejected = set(re.findall(r'"(<[^"]+>)"', tail)) | set(re.findall(r'"(example/demo\.py:\d+)"', tail))
 print(" ".join(sorted(e for e in emitted if e.lower() not in {r.lower() for r in rejected})))
 PY
 )
@@ -240,8 +247,21 @@ grep -q "first determine that function's purpose" "$SCRIPT" \
   && ok || bad "the v7 Method line lost its purpose-first half"
 grep -q "spend your output on the verdict" "$SCRIPT" \
   && ok || bad "the v7 Method line lost its brevity/verdict half"
-grep -q '^  METHOD=""$' "$SCRIPT" \
+grep -A1 'AGAINST THIS INTENT' "$SCRIPT" | grep -q '^  METHOD=""$' \
   && ok || bad "the --intent branch no longer empties METHOD (unbenched combination)"
+grep -A1 'Ignore every other kind of defect in this pass' "$SCRIPT" | grep -q '^  METHOD=""$' \
+  && ok || bad "the --angle branch no longer empties METHOD (the v7 purpose line trusts comments; this pass interrogates them)"
+
+# The stale-comment angle pass (docs/angle-stale-comment.md, shipped
+# 2026-08-18). Its inverted rule 2 and comment-anchored example are what was
+# measured fabrication-free; losing either silently reverts the pass to
+# judging code.
+grep -q 'Never report that documentation, comments, prose, or a README' "$SCRIPT" \
+  && ok || bad "the default prompt lost rule 2 (the measured anti-fabrication guard the angle design leans on)"
+grep -q 'The only reportable defect in this pass is a comment or docstring' "$SCRIPT" \
+  && ok || bad "the angle pass lost its comments-only rule"
+grep -q '# retries three times before giving up' "$SCRIPT" \
+  && ok || bad "the angle pass lost its comment-anchored format example"
 
 # --- argument validation -----------------------------------------------------
 # These run before any precondition, so they need neither a model nor a server.
@@ -263,6 +283,14 @@ arg_is "--provider with no value"           2 --provider
 arg_is "lmstudio without --model"           2 --provider lmstudio
 arg_is "--rounds needs a number"            1 --rounds abc
 arg_is "unknown flag"                       2 --nope
+# --angle: experiment wiring for the stale-comment pass
+# (docs/angle-stale-comment.md). The --rounds abc case discriminates: it only
+# exits 1 if --angle itself parsed and execution reached rounds validation.
+arg_is "--angle with no value"              2 --angle
+arg_is "unknown angle is a usage error"     2 --angle bogus
+arg_is "--angle excludes --intent"          2 --angle stalecomment --intent x
+arg_is "--angle stalecomment parses"        1 --angle stalecomment --rounds abc
+arg_is "--angle empty value is a usage error" 2 --angle ""
 
 # --- the lock ----------------------------------------------------------------
 # Exercised through the script's own acquire_lock, sourced with everything

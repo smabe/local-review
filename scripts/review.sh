@@ -26,6 +26,7 @@ MODEL_EXPLICIT=0
 CONTEXT_LENGTH=49152
 ROUNDS=3
 INTENT=""
+ANGLE=""
 RAW_STREAM=0
 RAW=""
 DIFF_TRUNCATION_BYTES=50000
@@ -43,7 +44,7 @@ note() { printf 'local-review: %s\n' "$1" >&2; }
 
 usage() {
   cat >&2 <<'USAGE'
-usage: review.sh [--intent SENTENCE] [--rounds N] [--json]
+usage: review.sh [--intent SENTENCE] [--angle NAME] [--rounds N] [--json]
                  [--provider NAME] [--model ID]
 
   --intent SENTENCE  Judge changes against this stated intent. One sentence,
@@ -53,6 +54,11 @@ usage: review.sh [--intent SENTENCE] [--rounds N] [--json]
   --rounds N         Tool-call budget (default 3). Raise to 4-5 when the
                      review needs a codebase search pass. The cap is a
                      stability guard, not a speed knob.
+  --angle NAME       Run a single-class angle pass instead of the general
+                     review. The only angle is 'stalecomment' (comments and
+                     docstrings the changed code contradicts) -- an opt-in
+                     experiment, see docs/angle-stale-comment.md. Mutually
+                     exclusive with --intent.
   --json             Print pi's raw JSON event stream instead of the review.
                      Every run is audited either way; this shows the evidence.
   --provider NAME    pi provider: llamaserver (default) or lmstudio.
@@ -71,6 +77,7 @@ USAGE
 while [ $# -gt 0 ]; do
   case "$1" in
     --intent)   [ $# -ge 2 ] || usage; INTENT="$2"; shift 2 ;;
+    --angle)    [ $# -ge 2 ] || usage; [ -n "$2" ] || usage; ANGLE="$2"; shift 2 ;;
     --rounds)   [ $# -ge 2 ] || usage; ROUNDS="$2"; shift 2 ;;
     --json)     RAW_STREAM=1; shift ;;
     --provider) [ $# -ge 2 ] || usage; PROVIDER="$2"; shift 2 ;;
@@ -92,6 +99,18 @@ esac
 # named the same as our default.
 if [ "$PROVIDER" != "llamaserver" ] && [ "$MODEL_EXPLICIT" -eq 0 ]; then
   printf 'local-review: --provider %s needs an explicit --model (the default is a llama-server id)\n\n' "$PROVIDER" >&2
+  usage
+fi
+
+case "$ANGLE" in
+  ''|stalecomment) ;;
+  *) printf 'local-review: unknown angle: %s\n\n' "$ANGLE" >&2; usage ;;
+esac
+# An intent frame declares changes correct by definition, which would excuse
+# the code side of every comment/code contradiction -- the combination is
+# self-defeating and unbenched.
+if [ -n "$ANGLE" ] && [ -n "$INTENT" ]; then
+  printf 'local-review: --angle and --intent are mutually exclusive\n\n' >&2
   usage
 fi
 
@@ -250,6 +269,8 @@ fi
 # trap: both caught the real bug 3/3, but the old setup bit the trap 2/3 and
 # invented 0-3 defects per run on a docs-only diff, where this one reported
 # nothing 3/3. Rules 1 and 2 are what kill the fabrications -- do not drop them.
+# On an --angle run the branch below replaces this literal WHOLESALE with the
+# angle's own variant; this one still serves every default and --intent run.
 SYSTEM_PROMPT='You are a code reviewer. You do not write, fix, or explain code, and you do not summarize changes.
 Your entire output is either a list of defects or the exact string "No findings." — never both.
 Rules you must obey:
@@ -282,7 +303,42 @@ When there are no defects your entire message is exactly: No findings.'
 # the intent = correct by definition") and the purpose method ("contradicts
 # its function's purpose = defect") are two competing definitions of correct,
 # and the combination has never been benched.
-if [ -n "$INTENT" ]; then
+if [ "$ANGLE" = "stalecomment" ]; then
+  # Stale-comment angle pass (experiment -- docs/angle-stale-comment.md). A
+  # full system-prompt variant, never an edit to the shared scaffold: rule 2
+  # is inverted (comments become the ONLY reportable class), while the quote
+  # gate, unsure-omit, read-the-whole-function, and discard-if-agree rules
+  # carry over. The format example quotes a comment line so the model anchors
+  # findings on the comment, not the code. METHOD stays empty: the v7 purpose
+  # line trusts comments, this pass interrogates them.
+  SYSTEM_PROMPT='You are a code reviewer. You do not write, fix, or explain code, and you do not summarize changes.
+Your entire output is either a list of defects or the exact string "No findings." — never both.
+This pass checks ONE thing: whether comments and docstrings still tell the truth about the code they describe.
+Rules you must obey:
+1. Report a defect ONLY if you can quote the exact offending comment line verbatim from a file you have actually read this session. If you cannot quote the line, the defect does not exist and you must not report it.
+2. The only reportable defect in this pass is a comment or docstring that states a behaviour, rule, or guarantee which the code it describes does not implement. Quote the comment line itself. If the comment could fairly describe the code as written, it is not a defect.
+3. Judge only comments and docstrings that describe code this change adds or edits; a comment on untouched code is out of scope. In diff output, lines starting with "-" are the OLD version -- never quote them.
+4. Vague, incomplete, or stylistically dated comments are not defects; only a claim the code contradicts is. Missing comments are never defects. Defects in the code itself are out of scope for this pass: never report them.
+5. If you are unsure, omit it. A missed stale comment costs less than a false one.
+6. Before judging a comment, read the complete function or block it describes.
+7. If while writing or checking a finding you conclude the comment and code actually agree, discard that finding entirely. Never emit a finding and then argue against it.
+Each finding uses four labeled lines; keep every value on the same line as its label. One complete example (synthetic -- never echo it):
+FILE: example/demo.py:3 | confidence: high
+QUOTE: # retries three times before giving up
+DEFECT: The comment claims three retries; the request below runs once with no retry.
+FAILURE: A reader trusting the comment ships code that breaks on the first transient error.
+When there are no defects your entire message is exactly: No findings.'
+  OPENING="Review the uncommitted changes in this repository for one class of defect only: comments and docstrings that no longer match the code after this change.
+Work from the changed hunks: for each changed function, read its docstring and nearby comments, then check every behaviour they claim against the code as it now stands.
+If a claim still holds, it is not a defect. If the code no longer does what the comment says, that IS the defect: FILE and QUOTE name the comment line itself, exactly as it appears in the current file. DEFECT states what the comment claims and what the code actually does now. FAILURE names what a reader following the comment would get wrong.
+Ignore every other kind of defect in this pass."
+  METHOD=""
+elif [ -n "$ANGLE" ]; then
+  # Unreachable while the whitelist above lists only stalecomment; it exists
+  # so a future angle added there WITHOUT a prompt wired here dies loudly
+  # instead of silently running another angle's prompt.
+  die "angle '$ANGLE' passed validation but has no prompt wired"
+elif [ -n "$INTENT" ]; then
   OPENING="Review the uncommitted changes in this repository for correctness bugs, judging every change AGAINST THIS INTENT: ${INTENT} A change that implements the stated intent is correct by definition; do not report it. Report only defects that contradict the intent or are unrelated to it."
   METHOD=""
 else
@@ -407,6 +463,7 @@ PLACEHOLDERS = {
     "file:line",
     "path/to/file.py:line",
     "example/demo.py:12",
+    "example/demo.py:3",
 }
 
 def is_placeholder(value):

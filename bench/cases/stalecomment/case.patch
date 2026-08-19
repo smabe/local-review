@@ -1,0 +1,13 @@
+diff --git a/parser.py b/parser.py
+index 6e4e38e..f7b14f3 100644
+--- a/parser.py
++++ b/parser.py
+@@ -19,6 +19,8 @@ def parse_config(text):
+         value = value.strip()
+         if not key:
+             raise ValueError(f"line {lineno}: empty key")
++        if key in result:
++            continue
+         result[key] = value
+     return result
+ 

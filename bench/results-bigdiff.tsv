@@ -22,3 +22,5 @@ qwen38-nothink-purpose2	2	4	699	3	3	0	import_after_guard,migrate_discard,export_
 qwen38-nothink-purpose2	3	4	704	4	4	0	migrate_discard,import_after_guard,export_exit0,cache_evict
 qwen38-nothink-purpose2-c	1	4	730	4	4	0	migrate_discard,import_after_guard,export_exit0,export_default_ns
 qwen38-nothink-purpose2-c	2	4	588	4	4	0	migrate_discard,import_after_guard,export_exit0,export_default_ns
+qwen38-nothink-anglSC-big	1	1	0	0	0	0	EMPTY-LOG
+qwen38-nothink-anglSC-big-b	1	4	767	2	0	2	-

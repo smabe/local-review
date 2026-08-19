@@ -133,6 +133,7 @@ unloads it afterwards.
 |---|---|
 | `--intent "<sentence>"` | judge the diff against a stated purpose — read the caveat below before using it |
 | `--rounds N` | tool-call budget, default 3; raise to 4–5 when the review needs a codebase search pass |
+| `--angle stalecomment` | opt-in single-class pass: reports ONLY comments and docstrings the changed code contradicts, quoting the comment line — the one class rule 2 bans from the default pass. It replaces the general review for that run, so run it in addition to the default pass, never instead; its exit 0 says nothing about correctness bugs. Measured fabrication-free (docs/angle-stale-comment.md); mutually exclusive with `--intent` |
 | `--json` | print pi's raw event stream instead of the review; every run is audited either way |
 | `--provider NAME` | `llamaserver` (default) or `lmstudio` |
 | `--model ID` | model id as declared in `~/.pi/agent/models.json`; required whenever `--provider` is not the default |
@@ -254,13 +255,15 @@ someone else's stated intent.
 | File | What it is |
 |---|---|
 | `scripts/review.sh` | **The entry point.** Preconditions, model load/unload, prompt assembly, and the run audit |
-| `tests/test_local_review_audit.sh` | 74 assertions over the audit, the model lock, and argument validation. The code under test is extracted from `review.sh` at run time, so the tests cannot pass against a stale copy. Run with `bash tests/test_local_review_audit.sh`. Two drift checks report `SKIP` unless you also have the private repo checked out and point `LOCAL_REVIEW_MIRROR` at it — they compare this copy against its counterpart, which a standalone clone has nothing to compare to. `skipped=` in the footer is the count |
+| `tests/test_local_review_audit.sh` | 84 assertions over the audit, the model lock, and argument validation. The code under test is extracted from `review.sh` at run time, so the tests cannot pass against a stale copy. Run with `bash tests/test_local_review_audit.sh`. Two drift checks report `SKIP` unless you also have the private repo checked out and point `LOCAL_REVIEW_MIRROR` at it — they compare this copy against its counterpart, which a standalone clone has nothing to compare to. `skipped=` in the footer is the count |
 | `skill/SKILL.md` | The Claude Code skill — invocation, the intent caveat, hard limits |
 | `models.example.json` | pi provider config for LM Studio (:1234) and llama-server (:8080); the template for adding your own model |
 | `bench/` | The measurement instrument: seeded-defect cases, an 18KB big-diff fixture, frontier-model transcripts to score against, and the runners that replay them through the real `review.sh`. This is how you check whether a different model holds up |
 | `docs/model-choice.md` | Decision record: why these models, the prompts, the settings, the harness |
 | `docs/evict-gap.md` | How the purpose-anchored prompt (v7) was measured, and what it moved |
 | `docs/angle-removed-behavior.md` | The removed-guard experiment behind the `removedguard` bench case |
+| `docs/experiment-loop.md` | the codified loop every reviewer change goes through: pre-registered hypothesis and decision rule, bench, ship or revert |
+| `docs/angle-stale-comment.md` | the stale-comment angle experiment: pre-registration, measured results, ship verdict |
 | `scripts/llama_server.sh` | Serves a GGUF via llama-server on :8080 — the measured default reviewer when called bare, or any model you pass a path and flags for |
 | `scripts/local_review.py` | Legacy diff-pipe: posts a diff straight to the API, no agent loop. Only useful with *thinking* models, which review diffs well but are too slow to finish agentically. Do NOT use the coder model with it — diff-blind, it fabricates findings |
 | `scripts/test_local_review_scope.py` | Regression tests for the diff-pipe's review scope (untracked files, empty repos) |
