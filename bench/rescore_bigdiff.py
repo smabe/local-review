@@ -14,13 +14,43 @@ score_bigdiff.py says today.
   python3 bench/rescore_bigdiff.py           # rewrite in place
   python3 bench/rescore_bigdiff.py --check   # report drift, change nothing
 """
+import os
 import pathlib
+import shutil
 import subprocess
 import sys
+import tempfile
 
 BENCH = pathlib.Path(__file__).resolve().parent
 RESULTS = BENCH / "results-bigdiff.tsv"
 SCORER = BENCH / "score_bigdiff.py"
+
+# Where each pre-existing column sat before the 2026-08-19 migration, which
+# only ever APPENDED (status date sha vsurv vtotal). Positions are what this
+# script trusts to rewrite a row, so a column that moved would make it write
+# every score into the wrong cell -- silently, since every value is a plain
+# string. Checked once per run against the live header; see
+# docs/bench-hardening-spec.md, "Canonical schema".
+HISTORICAL_INDEX = {
+    "label": 0, "run": 1, "exit": 2, "secs": 3,
+    "nfind": 4, "hits": 5, "other": 6, "bugs": 7,
+}
+# A row narrower than the pre-migration width is truncated, not old: every row
+# ever written carried all eight of these.
+NARROWEST = len(HISTORICAL_INDEX)
+
+
+def cell(cols, idx, name):
+    """One field, empty when the row predates the column.
+
+    The file is legitimately mixed-width from the migration commit forward:
+    the header carries the new names and the historical rows do not. A missing
+    field says "this row predates the column", which is the true fact; writing
+    a blank onto it would assert "no data" for runs whose data still exists in
+    bench/logs/*.err.
+    """
+    i = idx[name]
+    return cols[i] if i < len(cols) else ""
 
 
 def main():
@@ -32,6 +62,15 @@ def main():
 
     head = lines[0].split("\t")
     idx = {name: i for i, name in enumerate(head)}
+    for name, want in sorted(HISTORICAL_INDEX.items(), key=lambda kv: kv[1]):
+        got = idx.get(name)
+        if got != want:
+            sys.stderr.write(
+                f"header corrupt: column '{name}' is at index {got}, expected "
+                f"{want}. New columns append at the END only -- an insert or a "
+                f"reorder shifts every stored score. Refusing to rewrite "
+                f"{RESULTS.name}.\n")
+            return 1
     out = [lines[0]]
     changed = 0
 
@@ -43,15 +82,30 @@ def main():
     # through to the rescore and the older observation is overwritten with
     # the newer run's findings. Measured 2026-08-18 by the benchmark
     # session, against this very file.)
+    #
+    # Keyed on (label, run) and NOT on date: a rescored row keeps the date it
+    # was measured on, so folding date into the key would make every rescore
+    # look like a new row.
     data = [ln for ln in lines[1:] if ln.strip()]
     owner = {}
     for i, ln in enumerate(data):
         cols = ln.split("\t")
-        owner[(cols[idx["label"]], cols[idx["run"]])] = i
+        if len(cols) < NARROWEST:
+            continue
+        owner[(cell(cols, idx, "label"), cell(cols, idx, "run"))] = i
 
     for i, line in enumerate(data):
         cols = line.split("\t")
-        label, run = cols[idx["label"]], cols[idx["run"]]
+        # A truncated row still yields a label and a run, so it would reach the
+        # scorer and then die on the positional write-back below -- aborting the
+        # whole pass and leaving the file half-rescored under two rule sets,
+        # which is the one outcome every other guard here exists to prevent.
+        if len(cols) < NARROWEST:
+            print(f"  data row {i + 1} has {len(cols)} of {NARROWEST} original "
+                  f"columns -- truncated, left as-is")
+            out.append(line)
+            continue
+        label, run = cell(cols, idx, "label"), cell(cols, idx, "run")
         if owner[(label, run)] != i:
             print(f"  duplicate row {label} run {run}: the log belongs to the "
                   f"LAST occurrence; this earlier observation left as-is")
@@ -80,7 +134,8 @@ def main():
             out.append(line)
             continue
         hits, other, bugs = res.stdout.strip().split(" ", 2)
-        before = (cols[idx["hits"]], cols[idx["other"]], cols[idx["bugs"]])
+        before = (cell(cols, idx, "hits"), cell(cols, idx, "other"),
+                  cell(cols, idx, "bugs"))
         after = (hits, other, bugs)
         if before != after:
             changed += 1
@@ -94,7 +149,28 @@ def main():
     if check:
         print(f"{changed} row(s) would change")
         return 0
-    RESULTS.write_text("\n".join(out) + "\n")
+    # Temp file in the SAME directory, then os.replace: the rename is atomic on
+    # both platforms this runs on, and same-directory is what keeps it on one
+    # filesystem. A direct write leaves a window in which the file on disk is
+    # half the old evidence and half the new -- and this file is the derived
+    # cache for 40 measured runs, several of whose transcripts are already gone.
+    fd, tmp = tempfile.mkstemp(dir=str(RESULTS.parent), prefix=RESULTS.name,
+                               suffix=".part")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write("\n".join(out) + "\n")
+        # mkstemp creates owner-only, and os.replace carries the temp file's
+        # mode onto the destination -- so without this the committed evidence
+        # silently goes 0644 -> 0600 on every rescore. Git tracks only the exec
+        # bit, so nothing in the diff would ever show it.
+        shutil.copymode(RESULTS, tmp)
+        os.replace(tmp, RESULTS)
+    except BaseException:
+        # Including KeyboardInterrupt: a ^C between mkstemp and replace would
+        # otherwise leave a stray .part beside the evidence it did not touch.
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
     print(f"rewrote {RESULTS.name}: {changed} row(s) changed")
     return 0
 

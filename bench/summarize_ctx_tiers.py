@@ -18,6 +18,12 @@ ARMS = [
     ("qwen38-nothink-ctx96k", 98304),
 ]
 DEFECT_CASES = ["offbyone", "swallow", "boolean", "leak"]
+# Added by the 2026-08-19 header migration. The results files are legitimately
+# mixed-width from that commit forward -- the header carries these names and
+# the 385 rows written before it do not -- so they are defaulted here rather
+# than backfilled into the data. Every OTHER name stays a strict lookup, so a
+# genuine schema error still fails loudly instead of reading as an old row.
+NEW_COLUMNS = ("status", "date", "sha", "vsurv", "vtotal")
 
 
 def read_tsv(path):
@@ -25,7 +31,17 @@ def read_tsv(path):
     if not lines:
         return []
     head = lines[0].split("\t")
-    return [dict(zip(head, l.split("\t"))) for l in lines[1:] if l.strip()]
+    rows = []
+    for l in lines[1:]:
+        if not l.strip():
+            continue
+        # zip truncates to the shorter side, so a narrow row maps every name it
+        # does have correctly and simply omits the rest.
+        row = dict(zip(head, l.split("\t")))
+        for name in NEW_COLUMNS:
+            row.setdefault(name, "")
+        rows.append(row)
+    return rows
 
 
 def peak_wired_gb(label):

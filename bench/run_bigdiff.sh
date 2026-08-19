@@ -9,11 +9,14 @@
 # none of them (fabrication candidates, to be read by hand in logs/).
 #
 # Appends TSV rows to results-bigdiff.tsv:
-#   label run exit secs nfind hits other bugs
+#   label run exit secs nfind hits other bugs status date sha vsurv vtotal
 #     nfind  the audit's own validated finding count
 #     hits   how many of the six known bugs were quoted
 #     other  finding blocks matching no known bug (read the log before judging)
 #     bugs   comma-separated ids of the ones hit
+#   The five-column tail is shared with run_eval.sh, same names in the same
+#   order, and carries the same meaning -- see bench/run_eval.sh's header
+#   comment for what each one is and why vsurv/vtotal are empty rather than 0.
 set -uo pipefail
 
 EVAL_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -83,7 +86,7 @@ if [ ! -d "$REPO/.git" ]; then
   git -C "$REPO" commit -qm "base: store, parser, cache, serialize, cli"
 fi
 
-[ -f "$RESULTS" ] || printf 'label\trun\texit\tsecs\tnfind\thits\tother\tbugs\n' > "$RESULTS"
+[ -f "$RESULTS" ] || printf 'label\trun\texit\tsecs\tnfind\thits\tother\tbugs\tstatus\tdate\tsha\tvsurv\tvtotal\n' > "$RESULTS"
 
 for run in $(seq 1 "$RUNS"); do
   # reset --hard, not checkout: the previous run's `git add -N` leaves the two
@@ -152,8 +155,22 @@ EOF
     echo "run_bigdiff.sh: score_bigdiff.py failed for $log -- row marked SCORE-ERROR" >&2
   fi
 
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+  # Both counts or neither, scraped with the same leading-.* idiom as nfind
+  # above: the line is prefixed by review.sh's `note` helper, so anchoring at
+  # ^verify: would match nothing and leave two empty cells that read exactly
+  # like a run which never verified.
+  vsurv=""; vtotal=""
+  vpair=$(sed -n 's|.*verify: \([0-9][0-9]*\)/\([0-9][0-9]*\) finding(s) survived.*|\1 \2|p' "$log.err" | tail -1)
+  if [ -n "$vpair" ]; then vsurv="${vpair% *}"; vtotal="${vpair#* }"; fi
+
+  # Empty until the classifier lands (phase infra-status). SCORE-ERROR still
+  # rides the bugs column for now; that migration belongs to the same phase.
+  status=""
+  # Per row, never hoisted out of the loop -- a bigdiff batch runs for hours.
+  rowdate=$(date +%F)
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$LABEL" "$run" "$rc" "$secs" "$nfind" "$hits" "$other" "$bugs" \
+    "$status" "$rowdate" "$REVIEW_SHA" "$vsurv" "$vtotal" \
     | tee -a "$RESULTS"
 done
 

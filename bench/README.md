@@ -28,14 +28,14 @@ stale-comment angle that SHIPPED — `docs/angle-stale-comment.md`).
 | `removedguard` | parser.py | a tidy `partition()` consolidation silently deletes the `if not key: raise` guard, so `"=value"` yields `{"": "value"}` instead of raising | the refactor-disguised removed guard; not in the default case list — run via `LOCAL_REVIEW_EVAL_CASES="removedguard"` |
 | `stalecomment` | parser.py | no code bug: duplicate keys switch from last-wins to first-wins (correct, intended), while the docstring still says "later duplicates win" | the stale-doc case. Scores only under `LOCAL_REVIEW_EVAL_CASES="stalecomment" LOCAL_REVIEW_EVAL_ARGS="--angle stalecomment"`; its meta `expected_exit=0` is calibrated for the DEFAULT pass (rule 2 bans the finding; measured 2/2, v7 instead misattributes the contradiction onto the correct code). The angle arm's success signature is exit 4 + `found=1`, scored by hand per docs/angle-stale-comment.md |
 
-**Scoring caveat for `--verify` arms** (`qwen38-nothink-vfy*` rows): run_eval's
-columns predate verification. `nfind` is scraped from the audit's stderr line,
-which reports the PRE-refutation count, and `found` requires exit 4 — so a run
-whose true catch was wrongly refuted records `exit=0 nfind=1 found=0
-found_any=1`, indistinguishable in the TSV from a formatting miss. Score
-verify arms from the logs (the `verify: N/M` stderr line and the VERDICT
-lines), never from the TSV alone. A verify-aware scorer is filed future work
-in docs/verify-flag.md.
+**Scoring `--verify` arms** (`qwen38-nothink-vfy*` rows): the `vsurv`/`vtotal`
+columns answer this from the TSV as of the schema migration below. `nfind` is
+still the PRE-refutation count and `found` still requires exit 4, so an
+all-refuted run records `exit=0 nfind=1 found=0 found_any=1` — but it now also
+records `vsurv=0 vtotal=1`, which is what separates it from a formatting miss.
+**Rows written before 2026-08-19 have neither column**, and for those the old
+rule stands: score them from the logs (the `verify: N/M` stderr line and the
+VERDICT lines), never from the TSV alone.
 
 **Cross-era scoring note (2026-08-19):** the scorer gained the sixth bug and
 stopped parsing --verify echo sections on 2026-08-19, and `rescore_bigdiff.py`
@@ -142,10 +142,13 @@ a convention, and this paragraph is the convention.
 ## Reading the results
 
 `results.tsv` — one row per small-case run:
-`label case run exit expected secs nfind found found_any`
+`label case run exit expected secs nfind found found_any status date sha vsurv vtotal`
 
 `results-bigdiff.tsv` — one row per big-diff run:
-`label run exit secs nfind hits other bugs`
+`label run exit secs nfind hits other bugs status date sha vsurv vtotal`
+
+`results-verify.tsv` — one row per verifier probe item:
+`label item run verdict truth gating secs agree status date sha`
 
 - **exit** is `review.sh`'s own exit code: `0` clean · `1` error · `2` usage ·
   `3` the verdict cannot be trusted · `4` defects reported. `124` is the
@@ -159,6 +162,43 @@ a convention, and this paragraph is the convention.
   matching no known bug — a fabrication *candidate*, not a fabrication, because
   the fixture is real code and a sixth real bug is possible. Read the log in
   `logs/` before calling one a fabrication.
+
+The last columns are the provenance tail, the same names in the same order in
+all three files. **Read `status` first**: it gates whether anything else in the
+row means what it says.
+
+- **status** — empty on a normal run. Non-empty means the row is not a clean
+  measurement, and the value names the cause. Empty on every row today; the
+  classifier that fills it is the next change in this workstream.
+- **date** — `date +%F`, stamped when the row is appended rather than when the
+  batch started, so an arm running through midnight reports each run under the
+  day it actually finished.
+- **sha** — the first 12 hex of the sha256 of the script the batch ran: for the
+  two review runners, the frozen snapshot described above; for `run_verify.sh`,
+  which never invokes `review.sh`, that runner's own checksum, because the
+  artifact under measurement there is the verifier prompt inside it.
+  **This pins the script and, since the prompts are embedded in it, the prompt
+  version — nothing more.** It does not capture the model id, the context tier,
+  or `models.json`'s `contextWindow`; two rows with one `sha` are comparable
+  only if those matched too.
+- **vsurv / vtotal** — findings that survived `--verify`'s adversarial pass, and
+  findings it checked. `results-verify.tsv` does not have them: it *is* the
+  verifier probe, and its `verdict` column already carries that signal.
+  **Empty is not zero.** `review.sh` emits the line these are read from only
+  when verify is on *and* the audit found something, so an all-refuted run is
+  `exit=0` with `vtotal=N` while a genuinely clean one is `exit=0` with
+  `vtotal` empty. That distinction is the whole reason the pair exists.
+
+**Cross-era schema note (2026-08-19):** the five columns above were added to all
+three headers in one commit and **the 385 rows already in the files were not
+backfilled**, so every file is legitimately mixed-width from that commit
+forward. A missing field states the true fact — "this row predates the column" —
+where a blank would assert "no data" for runs whose verify output still exists
+in `logs/*.err`. The invariant to check is therefore `NF <= header NF`, never
+equality, and the readers here default the new names to the empty string while
+keeping every older name a strict lookup, so a real schema error still fails
+loudly. New columns append at the **END** only: `rescore_bigdiff.py` maps header
+names to positions and refuses to run if a pre-existing one has moved.
 
 Verdict transcripts in `logs/` are the durable evidence; the TSVs are a derived
 cache. `rescore_bigdiff.py` rebuilds them, which is what makes a mid-run scoring

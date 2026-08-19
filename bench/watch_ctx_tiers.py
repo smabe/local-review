@@ -27,6 +27,10 @@ ARMS = [
 CASES = ["offbyone", "swallow", "boolean", "leak", "clean"]
 RUNS = 2
 DEFECT_CASES = {"offbyone", "swallow", "boolean", "leak"}
+# Added by the 2026-08-19 header migration; defaulted rather than backfilled,
+# for the reason spelled out in summarize_ctx_tiers.py. Existing names stay
+# strict lookups so a real schema error still fails loudly.
+NEW_COLUMNS = ("status", "date", "sha", "vsurv", "vtotal")
 
 BOLD, DIM, RESET = "\033[1m", "\033[2m", "\033[0m"
 GREEN, RED, YELLOW, BLUE, GREY = (
@@ -40,7 +44,15 @@ def read_tsv(path):
     if not lines:
         return []
     head = lines[0].split("\t")
-    return [dict(zip(head, l.split("\t"))) for l in lines[1:] if l.strip()]
+    rows = []
+    for l in lines[1:]:
+        if not l.strip():
+            continue
+        row = dict(zip(head, l.split("\t")))
+        for name in NEW_COLUMNS:
+            row.setdefault(name, "")
+        rows.append(row)
+    return rows
 
 
 def started_at(name):

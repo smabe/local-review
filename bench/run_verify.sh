@@ -1,7 +1,17 @@
 #!/usr/bin/env bash
 # run_verify.sh PROVIDER MODEL RUNS LABEL — verifier capability probe over
 # bench/verify/items (docs/verifier-pass.md). Appends TSV rows to
-# bench/results-verify.tsv: label item run verdict truth gating secs agree
+# bench/results-verify.tsv:
+#   label item run verdict truth gating secs agree status date sha
+#
+# `status` and `date` mean what they mean in the other two runners. `sha` is
+# THIS script's own checksum, because this runner never invokes review.sh --
+# the artifact under measurement here is the verifier prompt below, which lives
+# in this file. There is deliberately no vsurv/vtotal pair: this IS the verifier
+# probe, `verdict` already carries the survivor signal those columns add
+# elsewhere, and a permanently-empty column trains readers to skim past
+# emptiness -- after which a genuine parse failure in a verify arm reads as
+# normal.
 set -uo pipefail
 
 EVAL_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -23,13 +33,33 @@ or
 VERDICT: refuted
 REASON: <one line>'
 
+# This runner's own version, recorded on every row it writes. Two-way fallback
+# because neither tool is universal -- shasum is perl (macOS yes, minimal Linux
+# no), sha256sum is coreutils (the reverse) -- and an empty result covers "not
+# installed" and "installed but broken" alike. Refuse rather than record a blank
+# version: a probe whose prompt version is unknown is not evidence.
+# (Hand-copied from run_eval.sh's review_sha, which is now the fourth copy of
+# this block; see plans/bench-row-hardening.md's Findings log.)
+SELF="$EVAL_DIR/$(basename "$0")"
+if [ ! -r "$SELF" ]; then
+  echo "run_verify.sh: cannot read $SELF -- no version to record" >&2; exit 2
+fi
+RUN_SHA=$(shasum -a 256 "$SELF" 2>/dev/null | awk '{print $1}')
+if [ -z "$RUN_SHA" ]; then RUN_SHA=$(sha256sum "$SELF" 2>/dev/null | awk '{print $1}'); fi
+if [ -z "$RUN_SHA" ]; then
+  echo "run_verify.sh: no working shasum or sha256sum -- refusing a batch whose script version cannot be recorded" >&2
+  exit 2
+fi
+RUN_SHA="${RUN_SHA:0:12}"
+echo "run_verify.sh: $SELF (sha256 $RUN_SHA)" >&2
+
 mkdir -p "$EVAL_DIR/logs"
 if [ ! -d "$REPO/.git" ]; then
   mkdir -p "$REPO"; cp "$EVAL_DIR"/base/*.py "$REPO/"
   git -C "$REPO" init -q; git -C "$REPO" add -A
   git -C "$REPO" commit -qm "base: store + parser"
 fi
-[ -f "$RESULTS" ] || printf 'label\titem\trun\tverdict\ttruth\tgating\tsecs\tagree\n' > "$RESULTS"
+[ -f "$RESULTS" ] || printf 'label\titem\trun\tverdict\ttruth\tgating\tsecs\tagree\tstatus\tdate\tsha\n' > "$RESULTS"
 
 for run in $(seq 1 "$RUNS"); do
   for dir in "$EVAL_DIR"/verify/items/*/; do
@@ -77,8 +107,14 @@ PY
     elif printf '%s\n' "$verdicts" | grep -qx refuted; then verdict=refuted
     else verdict=none; fi
     agree=0; [ "$verdict" = "$truth" ] && agree=1
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-      "$LABEL" "$item" "$run" "$verdict" "$truth" "$gating" "$secs" "$agree" | tee -a "$RESULTS"
+    # Empty until this runner gets an rc and a watchdog (phase verify-runner);
+    # it invokes pi synchronously today, so there is nothing yet to classify.
+    status=""
+    # Per row, never hoisted: 13 items x N runs is a long batch.
+    rowdate=$(date +%F)
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$LABEL" "$item" "$run" "$verdict" "$truth" "$gating" "$secs" "$agree" \
+      "$status" "$rowdate" "$RUN_SHA" | tee -a "$RESULTS"
   done
 done
 git -C "$REPO" checkout -q -- .

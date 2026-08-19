@@ -393,7 +393,38 @@ plus one worktree prober that built phase `snapshot` for real.
   locked rule applies unchanged. **Phase 5 (resume) should treat this as prior
   art**, and phase 2's `sha` column will make a same-label re-run visible in the
   rows for the first time.
-- **2026-08-19 (snapshot).** A batch that cannot checksum its script exits **2**,
+- **2026-08-19 (schema).** `status` now exists as an empty shell variable
+  assigned immediately before the row `printf` in all three runners
+  (`run_eval.sh`, `run_bigdiff.sh`, `run_verify.sh`), each with a comment naming
+  the phase that fills it. **Phase 3 assigns into that variable and phase 4 into
+  run_verify.sh's**; neither needs to touch a `printf` format string, and
+  neither should introduce a second name for the same cell. The empty value is
+  correct today by the plan's own definition — every row these runners write is
+  one that reached the model and produced a verdict.
+- **2026-08-19 (schema).** The checksum helper is now hand-duplicated in **four**
+  places, not three: `run_verify.sh` needed its own (its `sha` is its own
+  checksum, and it has no snapshot block to share), so it carries a trimmed
+  inline copy rather than `review_sha()` entire. The snapshot phase scoped the
+  extraction to "a phase that already edits all three runners (2, 3 or 5)" —
+  **phase 3 is now the better home than this one was**, because its Files
+  touched already carries `run_ctx_tiers.sh`, which holds the third copy and
+  which this phase had no licence to open. Extracting from three of four files
+  and leaving the fourth is how the drift happened the first time.
+- **2026-08-19 (schema).** `tests/test_bench_runners.sh`'s `relocate()` listed
+  only `verify` as `run_verify.sh`'s fixtures, but that runner also bootstraps
+  the shared `eval-repo` from `base/` and applies `cases/<fixture>/case.patch`
+  per item (`run_verify.sh:28,43`). Fixed here to `verify cases base`. **Phase 4
+  drives that runner for real** and would have hit an empty-repo bootstrap that
+  fails in a way pointing at the runner rather than at the harness.
+- **2026-08-19 (schema).** The working scrape for the verify line, for phases
+  that need to parse review.sh's stderr for anything else: `sed -n
+  's|.*verify: \([0-9][0-9]*\)/\([0-9][0-9]*\) finding(s) survived.*|\1 \2|p'`.
+  Two things in it are load-bearing — the leading `.*` (the line is prefixed by
+  `note`, `scripts/review.sh:45`) and the `|` delimiter, which avoids escaping
+  the `/` in `N/M`. Verified end to end against the real `review.sh` under a
+  stubbed `pi`, not against a hand-typed fixture, which is the only way the
+  anchoring bug shows up.
+- **2026-08-19 (schema).** A batch that cannot checksum its script exits **2**,
   reusing the existing "refused before dispatch, nothing recorded" code rather
   than inventing one. Phase 3 introduces a distinct infrastructure exit code and
   should decide then whether a missing `shasum`/`sha256sum` belongs there instead

@@ -1,10 +1,20 @@
 #!/usr/bin/env bash
 # run_eval.sh PROVIDER MODEL RUNS LABEL — drive review.sh over the seeded cases.
-# Appends TSV rows: label case run exit expected secs nfind found found_any
+# Appends TSV rows:
+#   label case run exit expected secs nfind found found_any status date sha vsurv vtotal
 #   exit     review.sh's exit (124 = watchdog timeout)
 #   nfind    the audit's own validated defect count, parsed from its footer
 #   found    planted line quoted in a QUOTE: line AND the run exited 4
 #   found_any  planted line quoted in a QUOTE: line regardless of exit
+#   status   empty on a normal run; non-empty means the row is not a clean
+#            measurement and no other field in it can be read at face value
+#   date     date +%F, stamped PER ROW -- a batch straddling midnight must not
+#            report every run under the day it started
+#   sha      first 12 hex of the sha256 of the script this batch actually ran
+#   vsurv    findings surviving --verify's adversarial pass, and vtotal the
+#   vtotal   findings it checked. EMPTY, never 0, when verification did not run:
+#            an all-refuted run is exit=0 with vtotal=N, a genuinely clean run
+#            is exit=0 with vtotal empty, and zero would collapse the two.
 set -uo pipefail
 
 EVAL_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -96,7 +106,7 @@ if [ ! -d "$REPO/.git" ]; then
   git -C "$REPO" commit -qm "base: store + parser"
 fi
 
-[ -f "$RESULTS" ] || printf 'label\tcase\trun\texit\texpected\tsecs\tnfind\tfound\tfound_any\n' > "$RESULTS"
+[ -f "$RESULTS" ] || printf 'label\tcase\trun\texit\texpected\tsecs\tnfind\tfound\tfound_any\tstatus\tdate\tsha\tvsurv\tvtotal\n' > "$RESULTS"
 
 for run in $(seq 1 "$RUNS"); do
   for c in $CASES; do
@@ -159,8 +169,29 @@ for run in $(seq 1 "$RUNS"); do
       found_any=1
       if [ "$rc" -eq 4 ]; then found=1; fi
     fi
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+
+    # Both counts, or neither. review.sh emits this line only when --verify is
+    # on AND the audit found something, so its absence is the "did not verify"
+    # signal and both cells stay empty.
+    #
+    # The leading .* is not decoration: the line arrives through review.sh's
+    # `note` helper, which prefixes `local-review: ` (scripts/review.sh:45,679),
+    # so a pattern anchored at ^verify: matches on no run ever made -- and the
+    # symptom is two empty cells, identical to a run that never verified. Same
+    # idiom as the nfind scrape above, for the same reason.
+    vsurv=""; vtotal=""
+    vpair=$(sed -n 's|.*verify: \([0-9][0-9]*\)/\([0-9][0-9]*\) finding(s) survived.*|\1 \2|p' "$log.err" | tail -1)
+    if [ -n "$vpair" ]; then vsurv="${vpair% *}"; vtotal="${vpair#* }"; fi
+
+    # Empty until the classifier lands (phase infra-status): a run that reached
+    # the model and produced a verdict is a clean measurement by definition.
+    status=""
+    # Per row, never hoisted: a batch that starts at 23:50 and runs four hours
+    # would otherwise stamp every row with the day it began.
+    rowdate=$(date +%F)
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
       "$LABEL" "$c" "$run" "$rc" "$expected_exit" "$secs" "$nfind" "$found" "$found_any" \
+      "$status" "$rowdate" "$REVIEW_SHA" "$vsurv" "$vtotal" \
       | tee -a "$RESULTS"
   done
 done

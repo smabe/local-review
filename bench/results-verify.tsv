@@ -1,4 +1,4 @@
-label	item	run	verdict	truth	gating	secs	agree
+label	item	run	verdict	truth	gating	secs	agree	status	date	sha
 qwen38-nothink-verify1	f1-stalecomment-misattr	1	real	refuted	0	52	0
 qwen38-nothink-verify1	f2-staleremoval-misattr	1	real	refuted	0	131	0
 qwen38-nothink-verify1	f3-echoed-template	1	refuted	refuted	1	29	1

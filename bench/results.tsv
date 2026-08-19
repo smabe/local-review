@@ -1,4 +1,4 @@
-label	case	run	exit	expected	secs	nfind	found	found_any
+label	case	run	exit	expected	secs	nfind	found	found_any	status	date	sha	vsurv	vtotal
 glm47flash-mlx	offbyone	1	3	4	272	0	0	0
 glm47flash-mlx	swallow	1	3	4	71	0	0	1
 glm47flash-mlx	boolean	1	3	4	117	0	0	0

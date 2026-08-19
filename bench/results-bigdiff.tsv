@@ -1,4 +1,4 @@
-label	run	exit	secs	nfind	hits	other	bugs
+label	run	exit	secs	nfind	hits	other	bugs	status	date	sha	vsurv	vtotal
 qwen38-nothink-ctx48k	1	4	584	3	3	0	import_after_guard,migrate_discard,export_exit0
 qwen38-nothink-ctx48k	2	4	718	3	3	0	import_after_guard,migrate_discard,export_exit0
 qwen38-nothink-ctx64k	1	4	725	3	3	0	migrate_discard,import_after_guard,export_exit0
