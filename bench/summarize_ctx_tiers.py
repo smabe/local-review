@@ -31,6 +31,10 @@ def read_tsv(path):
     if not lines:
         return []
     head = lines[0].split("\t")
+    # The columns a row must carry to be readable: everything the header names
+    # except the ones added by the 2026-08-19 migration, which are legitimately
+    # absent on the rows written before it.
+    required = [name for name in head if name not in NEW_COLUMNS]
     rows = []
     for l in lines[1:]:
         if not l.strip():
@@ -38,14 +42,16 @@ def read_tsv(path):
         # zip truncates to the shorter side, so a narrow row maps every name it
         # does have correctly and simply omits the rest.
         row = dict(zip(head, l.split("\t")))
-        # A line too short to carry a key is a kill mid-append, not a row: the
+        # A line short of those columns is a kill mid-append, not a row: the
         # runners deliberately leave it in place rather than rewriting evidence
-        # (bench/README.md, resume). Without this every reader below dies on
-        # r["run"] -- and this one runs at the end of every arm.
-        if "label" not in row or "run" not in row:
+        # (bench/README.md, resume). The threshold is what a READER indexes, not
+        # what resume keys on -- a cut that lands after `label`/`run` yields a
+        # key and then dies on the first missing column, and this one runs at
+        # the end of every arm.
+        if any(name not in row for name in required):
             sys.stderr.write(f"{path.name}: dropping a truncated line "
-                             f"({len(row)} field(s)) -- a batch killed "
-                             f"mid-append\n")
+                             f"({len(row)} of {len(required)} field(s)) -- a "
+                             f"batch killed mid-append\n")
             continue
         for name in NEW_COLUMNS:
             row.setdefault(name, "")
@@ -65,6 +71,30 @@ def measurements(rows, label):
     ARE measurements keep their status for the readers to weigh.
     """
     return [r for r in rows if r["label"] == label and r["run"].isdigit()]
+
+
+def unreached(row):
+    """True when the run behind this row never got a verdict out of the model.
+
+    Two signals, and they cover different eras of the corpus. A non-empty
+    `status` is the marker the runners write when a run failed for an
+    infrastructure reason (SUSPECT, SERVER-DOWN, EMPTY-LOG, ...). `exit == 1`
+    is review.sh's own error exit, and it is what makes this work backwards:
+    the rows written before the status column existed carry no marker at all,
+    so without the exit clause every historical junk run would stay in the
+    denominator (the operator hand-excluded 11 of them during the 2026-08-19
+    outage -- docs/angle-stale-comment.md -- which is the labour this replaces).
+
+    Exit 3 (untrusted verdict) and 124 (timeout) are deliberately NOT here, and
+    the asymmetry with the fabrication column below is the point rather than an
+    oversight. Detection asks "did it catch this planted defect", which a run
+    that timed out answers: no. Fabrication asks "did it invent a finding on a
+    clean diff", which the same run does not answer at all -- there is no
+    trustworthy verdict to read a finding count out of. So a 3 or a 124 is a
+    real detection miss and an unanswerable fabrication question, while an
+    exit 1 or a status marker is neither, because nothing was measured.
+    """
+    return bool(row.get("status", "")) or row.get("exit", "") == "1"
 
 
 def peak_wired_gb(label):
@@ -90,9 +120,17 @@ def main():
         if not rows:
             print(f"{label:24} {ctx:>6} {'(no data)':>9}")
             continue
-        defects = [r for r in rows if r["case"] in DEFECT_CASES]
+        scored = [r for r in rows if not unreached(r)]
+        dropped = len(rows) - len(scored)
+        # Say it on the arm's own line. An arm scored over half its rows that
+        # prints a bare rate is indistinguishable from one that ran clean, and
+        # that silence is what made the manual exclusion necessary.
+        note = f"  ({dropped} row(s) excluded: never reached the model)" if dropped else ""
+
+        defects = [r for r in scored if r["case"] in DEFECT_CASES]
         catches = sum(int(r["found"]) for r in defects)
         cleans = [r for r in rows if r["case"] == "clean"]
+        scored_cleans = [r for r in cleans if not unreached(r)]
         # A fabrication is a FINDING on a genuinely clean refactor, so count the
         # audit's own validated finding count -- not "exit was not 0". Exit 3
         # (untrusted verdict) and 124 (timeout) mean there is no usable verdict
@@ -101,26 +139,40 @@ def main():
         # happened and double-report the same run.
         # ... which requires actually filtering on exit: nfind alone counts a
         # half-emitted block on an exit-3 run as a fabrication.
-        fab = sum(1 for r in cleans if r["exit"] == "4")
-        unusable = sum(1 for r in cleans if r["exit"] in ("1", "3", "124"))
-        secs = sorted(int(r["secs"]) for r in rows)
+        fab = sum(1 for r in scored_cleans if r["exit"] == "4")
+        unusable = sum(1 for r in scored_cleans if r["exit"] in ("3", "124"))
+        secs = sorted(int(r["secs"]) for r in scored)
         if fab:
             clean_txt = f"{fab} fabricated"
         elif unusable:
             clean_txt = f"{unusable} unusable"
+        elif not scored_cleans:
+            # Every clean run of this arm is excluded, so there is no evidence
+            # either way. Saying "passed" here would report a pass for a run
+            # that never happened -- the same bug as counting one as a miss.
+            clean_txt = f"{len(cleans)} excluded" if cleans else "(no clean)"
         else:
             clean_txt = "passed"
-        print(f"{label:24} {ctx:>6} {f'{catches}/{len(defects)}':>9} {clean_txt:>12} "
-              f"{statistics.median(secs):>9.0f} {f'{secs[0]}-{secs[-1]}':>12}")
+        if not scored:
+            print(f"{label:24} {ctx:>6} {'(none)':>9} {clean_txt:>12}{note}")
+            continue
+        catch_txt = f"{catches}/{len(defects)}" if defects else "(none)"
+        print(f"{label:24} {ctx:>6} {catch_txt:>9} {clean_txt:>12} "
+              f"{statistics.median(secs):>9.0f} {f'{secs[0]}-{secs[-1]}':>12}{note}")
 
     print()
-    print("== small cases: untrusted verdicts and timeouts (exit 3 / 124 / 1) ==")
+    print("== small cases: bad runs (exit 1 / 3 / 124, or an infrastructure marker) ==")
+    # This is where a row the table above dropped becomes inspectable. Counting
+    # exclusions without ever naming them turns one silence into another: a
+    # status-marked run can carry exit 0 and would otherwise appear nowhere.
     any_bad = False
     for label, _ in ARMS:
         for r in measurements(small, label):
-            if r["exit"] in ("1", "3", "124"):
+            marker = r.get("status", "")
+            if marker or r["exit"] in ("1", "3", "124"):
                 any_bad = True
-                print(f"  {label} {r['case']} run {r['run']}: exit {r['exit']} after {r['secs']}s")
+                tail = f" [{marker}]" if marker else ""
+                print(f"  {label} {r['case']} run {r['run']}: exit {r['exit']} after {r['secs']}s{tail}")
     if not any_bad:
         print("  none")
 

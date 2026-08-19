@@ -44,19 +44,23 @@ def read_tsv(path):
     if not lines:
         return []
     head = lines[0].split("\t")
+    # Same rule as summarize_ctx_tiers.py: every header name except the ones the
+    # 2026-08-19 migration appended, which old rows legitimately lack.
+    required = [name for name in head if name not in NEW_COLUMNS]
     rows = []
     for l in lines[1:]:
         if not l.strip():
             continue
         row = dict(zip(head, l.split("\t")))
-        # A line too short to carry a key is a kill mid-append, not a row, and
-        # the runners leave it in place rather than rewriting evidence
-        # (bench/README.md, resume). Without this the live monitor raises
-        # KeyError on r["run"] at every refresh, for the whole rest of the arm.
-        if "label" not in row or "run" not in row:
+        # A line short of those columns is a kill mid-append, not a row, and the
+        # runners leave it in place rather than rewriting evidence
+        # (bench/README.md, resume). Keying the threshold on `label`/`run` alone
+        # is not enough: a cut landing after them clears that check and then
+        # raises KeyError on `found` at every refresh, for the rest of the arm.
+        if any(name not in row for name in required):
             sys.stderr.write(f"{path.name}: dropping a truncated line "
-                             f"({len(row)} field(s)) -- a batch killed "
-                             f"mid-append\n")
+                             f"({len(row)} of {len(required)} field(s)) -- a "
+                             f"batch killed mid-append\n")
             continue
         for name in NEW_COLUMNS:
             row.setdefault(name, "")

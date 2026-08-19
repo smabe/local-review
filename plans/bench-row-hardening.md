@@ -554,6 +554,47 @@ plus one worktree prober that built phase `snapshot` for real.
   load $MODEL" refusal has no signature either — same class as the LM Studio one
   fixed above, but it needs a new `status` value and a README vocabulary entry,
   which is a design decision rather than a peer of an existing pattern.
+- **2026-08-19 (scoring).** `watch_ctx_tiers.py` did **not** need the detection
+  filter and was deliberately left alone on that axis. It renders one verdict per
+  row and already gates every one of them on `status` (`:104`, `:128`), so it has
+  no denominator to poison — the hole was only ever in the sibling that
+  aggregates. What the filter DID need was a home for the exit-1 clause, and the
+  honest place turned out to be a named `unreached()` predicate applied to the
+  detection fraction, the latency median/range, and the clean-diff verdict
+  alike. One consequence worth knowing before reading an old arm: an **exit-1
+  clean row moves from `1 unusable` to the excluded count**, because a run that
+  errored is not a fabrication question that went unanswered — it is a run that
+  did not happen. Measured on `qwen38-nothink-anglSC`: `0/8  1 unusable  median 0
+  range 0-266` became `0/2  passed  median 73  range 46-266  (8 row(s)
+  excluded)`. The three published ctx-tier arms are byte-identical before and
+  after, which is the guard that the filter is not too broad.
+- **2026-08-19 (scoring).** The truncated-line guard both readers grew in the
+  `resume` phase was **set at the wrong threshold**, and `/code-review` caught it
+  here with a probe rather than by inspection. It dropped a line only when
+  `label`/`run` were missing, but a kill lands the cut wherever the write got to
+  — a line cut *after* the key columns yields a key, clears the guard, and then
+  dies on the first column the reader indexes. Reproduced: `KeyError: 'found'`
+  kills the end-of-arm summary outright and kills the live monitor at **every
+  3-second refresh for the rest of the arm**, which is the exact failure the
+  guard's own comment claimed to prevent. Fixed in both readers with one rule —
+  a row must carry every header name that is not in `NEW_COLUMNS`, so the
+  pre-migration rows stay legal and a cut row does not. **The writers still key
+  their resume scan on the key columns alone**, so a row cut after them is read
+  as a completed measurement and never re-dispatched: unreadable *and*
+  unrepairable. That half is filed below.
+- **2026-08-19 (scoring).** Two runner-side defects found by `/code-review` on
+  this phase and **left for a follow-up**, both in files this phase does not
+  touch and neither a peer of an existing pattern. (1) The resume scan drops a
+  row only when it is short of the KEY columns (`run_eval.sh:343`,
+  `run_bigdiff.sh:242`, `run_verify.sh:269`), so a row cut after them claims its
+  key forever; the fix is the same "wide enough to be a measurement" rule the
+  readers now use, pushed into `scan_recorded()` in all three, and it wants the
+  shared `bench/` helper this plan has filed three times already. (2) The lock's
+  owner pid is written *after* `mkdir` and a failed write is only logged
+  (`run_eval.sh:205`, same shape in the other two), so a batch arriving in that
+  window reads no pid, concludes the owner is gone, and prints advice to
+  `rm -rf` a lock that is actively held — reopening the concurrent-append race
+  the lock exists to close.
 - **2026-08-19 (schema).** A batch that cannot checksum its script exits **2**,
   reusing the existing "refused before dispatch, nothing recorded" code rather
   than inventing one. Phase 3 introduces a distinct infrastructure exit code and

@@ -710,6 +710,61 @@ else
 $(cat "$FX/out.txt")"
 fi
 
+# A kill lands the cut wherever the write got to, not tidily before the key. A
+# line cut AFTER the key columns yields a label and a run, clears the guard
+# above, and then dies on the first column the reader actually indexes -- which
+# for the summary is the end-of-arm table and for the live monitor is every
+# 3-second refresh for the rest of the arm. The threshold has to be the columns
+# a reader reads, not the columns resume keys on.
+FXC="$TMP/reader-cut"; mkdir -p "$FXC/logs"
+cp "$ROOT/bench/summarize_ctx_tiers.py" "$ROOT/bench/watch_ctx_tiers.py" "$FXC/"
+# A real arm label, so the two tools below walk the row instead of skipping it
+# as an arm they were not asked about -- which is where the KeyError lands.
+{
+    printf 'label\tcase\trun\texit\texpected\tsecs\tnfind\tfound\tfound_any\tstatus\tdate\tsha\tvsurv\tvtotal\n'
+    printf 'qwen38-nothink-ctx48k\toffbyone\t1\t4\t4\t100\t2\t1\t1\n'
+    printf 'qwen38-nothink-ctx48k\tswallow\t1\t4\n'
+} > "$FXC/results.tsv"
+printf 'label\trun\texit\tsecs\tnfind\thits\tother\tbugs\tstatus\tdate\tsha\tvsurv\tvtotal\n' \
+    > "$FXC/results-bigdiff.tsv"
+
+cat > "$FXC/read_cut.py" <<'PY'
+import pathlib
+import sys
+
+sys.path.insert(0, sys.argv[1])
+import summarize_ctx_tiers as summarize
+import watch_ctx_tiers as watch
+
+fixture = pathlib.Path(sys.argv[2])
+for mod in (summarize, watch):
+    name = mod.__name__
+    rows = mod.read_tsv(fixture)
+    assert len(rows) == 1, f"{name}: read {len(rows)} rows, expected 1"
+    # The survivor is the intact narrow row, not the cut one.
+    assert rows[0]["case"] == "offbyone", \
+        f"{name}: kept the cut row, not the intact one"
+    # And every column a reader indexes resolves on it.
+    for key in ("exit", "secs", "nfind", "found", "found_any"):
+        assert rows[0][key], f"{name}: {key} is empty on the intact row"
+print("ok")
+PY
+
+if python3 "$FXC/read_cut.py" "$FXC" "$FXC/results.tsv" > "$FXC/out.txt" 2>&1; then
+    ok
+else
+    bad "a line cut after the key columns is still handed to a reader that indexes past them:
+$(cat "$FXC/out.txt")"
+fi
+if grep -q 'truncated' "$FXC/out.txt"; then ok; else bad "the cut line was dropped silently:
+$(cat "$FXC/out.txt")"; fi
+# The whole point is that one damaged line costs one row, not the report. Both
+# tools have to still render the arms that are fine.
+if python3 "$FXC/summarize_ctx_tiers.py" > "$FXC/summ.txt" 2>&1; then ok; else bad "one cut line killed the end-of-arm summary:
+$(cat "$FXC/summ.txt")"; fi
+if python3 "$FXC/watch_ctx_tiers.py" --once > "$FXC/watch.txt" 2>&1; then ok; else bad "one cut line killed the live monitor:
+$(cat "$FXC/watch.txt")"; fi
+
 # --- rescore_bigdiff.py: mixed width, atomic write, index stability ----------
 
 RS="$TMP/rescore"; mkdir -p "$RS/logs"
@@ -2099,6 +2154,123 @@ if python3 "$WS/bench/rescore_bigdiff.py" --check > "$WS/rescore.txt" 2>&1 \
 else
     bad "a resumed arm does not survive a rescore round trip:
 $(cat "$WS/rescore.txt")"
+fi
+
+# --- the detection score counts only runs that reached the model -------------
+
+# summarize_ctx_tiers.py computed `catches / len(defects)` over every defect row
+# of an arm, with no exit filter, while the fabrication column immediately below
+# it DID filter exits 1/3/124. A run that never reached the model therefore
+# scored as a model MISS. Latent only because ARMS happens to name three clean
+# tiers; the operator hand-excluded 11 such runs during the 2026-08-19 outage
+# (docs/angle-stale-comment.md), which is the labour this automates.
+SUMF="$TMP/summ-filter"; mkdir -p "$SUMF/logs"
+cp "$ROOT/bench/summarize_ctx_tiers.py" "$SUMF/"
+{
+    printf 'label\tcase\trun\texit\texpected\tsecs\tnfind\tfound\tfound_any\tstatus\tdate\tsha\tvsurv\tvtotal\n'
+    # arm 1 — two marked measurement rows leave BOTH sides of the fraction.
+    printf 'qwen38-nothink-ctx48k\toffbyone\t1\t4\t4\t100\t1\t1\t1\t\t2026-08-19\tabc123def456\t\t\n'
+    printf 'qwen38-nothink-ctx48k\tswallow\t1\t4\t4\t120\t1\t0\t0\t\t2026-08-19\tabc123def456\t\t\n'
+    printf 'qwen38-nothink-ctx48k\tboolean\t1\t0\t4\t130\t0\t0\t0\tSUSPECT\t2026-08-19\tabc123def456\t\t\n'
+    printf 'qwen38-nothink-ctx48k\tleak\t1\t4\t4\t140\t0\t0\t0\tEMPTY-LOG\t2026-08-19\tabc123def456\t\t\n'
+    printf 'qwen38-nothink-ctx48k\tclean\t1\t4\t0\t110\t2\t0\t0\t\t2026-08-19\tabc123def456\t\t\n'
+    # arm 2 — exit 1 leaves with an EMPTY status (how the pre-column corpus
+    # records the same class of run); exits 3 and 124 deliberately STAY.
+    printf 'qwen38-nothink-ctx64k\toffbyone\t1\t1\t4\t0\t0\t0\t0\t\t2026-08-19\tabc123def456\t\t\n'
+    printf 'qwen38-nothink-ctx64k\tswallow\t1\t3\t4\t200\t0\t0\t0\t\t2026-08-19\tabc123def456\t\t\n'
+    printf 'qwen38-nothink-ctx64k\tboolean\t1\t124\t4\t900\t0\t0\t0\t\t2026-08-19\tabc123def456\t\t\n'
+    printf 'qwen38-nothink-ctx64k\tleak\t1\t4\t4\t150\t1\t1\t1\t\t2026-08-19\tabc123def456\t\t\n'
+    printf 'qwen38-nothink-ctx64k\tclean\t1\t3\t0\t210\t0\t0\t0\t\t2026-08-19\tabc123def456\t\t\n'
+    # arm 3 — the only clean row is marked, so the fabrication verdict has no
+    # evidence left. Reporting "passed" there is the same bug on the other column.
+    printf 'qwen38-nothink-ctx96k\toffbyone\t1\t4\t4\t160\t1\t1\t1\t\t2026-08-19\tabc123def456\t\t\n'
+    printf 'qwen38-nothink-ctx96k\tclean\t1\t0\t0\t50\t0\t0\t0\tSUSPECT\t2026-08-19\tabc123def456\t\t\n'
+} > "$SUMF/results.tsv"
+printf 'label\trun\texit\tsecs\tnfind\thits\tother\tbugs\tstatus\tdate\tsha\tvsurv\tvtotal\n' \
+    > "$SUMF/results-bigdiff.tsv"
+
+if python3 "$SUMF/summarize_ctx_tiers.py" > "$SUMF/out.txt" 2>&1; then ok; else bad "summarize_ctx_tiers.py failed on the filter fixture:
+$(cat "$SUMF/out.txt")"; fi
+# The detection table prints first, so the first line naming an arm is its row;
+# the same label recurs in the peak-memory table at the bottom.
+_l48=$(grep 'ctx48k' "$SUMF/out.txt" | head -1)
+_l64=$(grep 'ctx64k' "$SUMF/out.txt" | head -1)
+_l96=$(grep 'ctx96k' "$SUMF/out.txt" | head -1)
+
+case "$_l48" in
+    *1/2*) ok ;;
+    *) bad "a marked row stayed in the detection denominator: $_l48" ;;
+esac
+case "$_l48" in
+    *"2 row(s) excluded"*) ok ;;
+    *) bad "the arm reports a rate over a smaller base without saying so: $_l48" ;;
+esac
+# The fabrication column is not touched by any of this: an exit-4 clean row is
+# still a fabrication and an exit-3 one is still unusable.
+case "$_l48" in
+    *"1 fabricated"*) ok ;;
+    *) bad "the fabrication verdict changed on an unmarked exit-4 clean row: $_l48" ;;
+esac
+case "$_l64" in
+    *1/3*) ok ;;
+    *) bad "exit 1 stayed in the detection denominator, or exit 3/124 left it: $_l64" ;;
+esac
+case "$_l64" in
+    *"1 unusable"*) ok ;;
+    *) bad "the fabrication verdict changed on an exit-3 clean row: $_l64" ;;
+esac
+case "$_l96" in
+    *passed*) bad "an arm whose only clean row is marked still reports 'passed': $_l96" ;;
+    *) ok ;;
+esac
+case "$_l96" in
+    *1/1*) ok ;;
+    *) bad "the unmarked defect row did not survive the filter: $_l96" ;;
+esac
+# A marked run's `secs` is real but truncated (the runner records elapsed time
+# whatever went wrong), so it must not reach the latency median either.
+case "$_l48" in
+    *100-120*) ok ;;
+    *) bad "a marked row's seconds reached the latency range: $_l48" ;;
+esac
+
+# An arm with nothing scorable left has to say so. A ZeroDivisionError kills the
+# whole table, and a bare 0/0 reads as "the model caught nothing".
+SUMZ="$TMP/summ-zero"; mkdir -p "$SUMZ/logs"
+cp "$ROOT/bench/summarize_ctx_tiers.py" "$SUMZ/"
+{
+    printf 'label\tcase\trun\texit\texpected\tsecs\tnfind\tfound\tfound_any\tstatus\tdate\tsha\tvsurv\tvtotal\n'
+    printf 'qwen38-nothink-ctx48k\toffbyone\t1\t0\t4\t30\t0\t0\t0\tSUSPECT\t2026-08-19\tabc123def456\t\t\n'
+    printf 'qwen38-nothink-ctx48k\tclean\t1\t0\t0\t20\t0\t0\t0\tSUSPECT\t2026-08-19\tabc123def456\t\t\n'
+} > "$SUMZ/results.tsv"
+printf 'label\trun\texit\tsecs\tnfind\thits\tother\tbugs\tstatus\tdate\tsha\tvsurv\tvtotal\n' \
+    > "$SUMZ/results-bigdiff.tsv"
+
+if python3 "$SUMZ/summarize_ctx_tiers.py" > "$SUMZ/out.txt" 2>&1; then
+    ok
+else
+    bad "an arm with no scorable rows left crashed the summary:
+$(cat "$SUMZ/out.txt")"
+fi
+_lz=$(grep 'ctx48k' "$SUMZ/out.txt" | head -1)
+case "$_lz" in
+    *0/0*) bad "an arm with no scorable rows reports 0/0, which reads as a total miss: $_lz" ;;
+    *) ok ;;
+esac
+case "$_lz" in
+    *"2 row(s) excluded"*) ok ;;
+    *) bad "an arm with no scorable rows does not say what happened to them: $_lz" ;;
+esac
+
+# The real corpus is clean, so a correct filter moves nothing. Asserted on the
+# EXCLUSION NOTE rather than on a number, which would pin the test to the data.
+if python3 "$ROOT/bench/summarize_ctx_tiers.py" > "$TMP/summarize-real.txt" 2>&1; then ok; else bad "summarize_ctx_tiers.py no longer runs against the real results files:
+$(tail -5 "$TMP/summarize-real.txt")"; fi
+if grep -q 'excluded' "$TMP/summarize-real.txt"; then
+    bad "the filter excludes rows from the published ctx-tier arms, which are all exit 0 or 4:
+$(grep 'excluded' "$TMP/summarize-real.txt")"
+else
+    ok
 fi
 
 # --- the harness never writes into the real bench/ ---------------------------

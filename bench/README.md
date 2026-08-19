@@ -295,6 +295,36 @@ it carry the marker in `status` and leave all three of those columns empty.
 Neither era was rewritten, so reading `bugs` for a marker is correct for old
 rows and reading `status` is correct for new ones.
 
+### What the detection score counts
+
+`summarize_ctx_tiers.py` scores an arm only over the runs that reached the
+model. A row is dropped from **both sides** of the catch fraction — and from the
+latency median and range with it — when either is true:
+
+- `status` is non-empty, i.e. the runner classified the run as infrastructure;
+- `exit` is `1`, `review.sh`'s own error exit. This clause is what makes the
+  filter work on the rows written before the `status` column existed, which
+  carry no marker at all and were never backfilled.
+
+An arm that dropped anything says so on its own line —
+`(8 row(s) excluded: never reached the model)` — and every dropped row is named
+individually in the bad-runs table below the score, so an exclusion is
+inspectable rather than merely counted. This automates the manual exclusion of
+11 junk runs recorded in `docs/angle-stale-comment.md`, from the 2026-08-19
+outage.
+
+**Exit 3 and exit 124 deliberately stay counted as detection misses**, which
+looks inconsistent with the fabrication column beside it and is not. Detection
+asks "did it catch this planted defect", and a run that produced an untrusted
+verdict or timed out answers that: no. Fabrication asks "did it invent a finding
+on a clean diff", which the same run does not answer at all — there is no
+trustworthy verdict to read a finding count out of. So the two columns filter
+different exit sets on purpose.
+
+When an arm's clean-diff runs are all excluded, the clean column reports
+`N excluded` rather than `passed`: a pass claimed on a run that never happened
+is the same error as a miss recorded against one.
+
 ## What a runner's own exit code means
 
 Distinct from the `exit` column, which is `review.sh`'s.
