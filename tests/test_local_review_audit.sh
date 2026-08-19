@@ -34,7 +34,7 @@ skip() { skipped=$((skipped+1)); echo "SKIP: $1"; }
 
 # --- the audit ---------------------------------------------------------------
 
-awk '/^python3 - "\$RAW" "\$RAW_STREAM" <<.PY./{f=1;next} f&&/^PY$/{exit} f' \
+awk '/^python3 - "\$RAW" "\$RAW_STREAM" "\$FDIR" <<.PY./{f=1;next} f&&/^PY$/{exit} f' \
     "$SCRIPT" > "$TMP/audit.py"
 [ -s "$TMP/audit.py" ] || { echo "FAIL: could not extract the audit from $SCRIPT"; exit 1; }
 
@@ -260,10 +260,65 @@ grep -q 'Never report that documentation, comments, prose, or a README' "$SCRIPT
   && ok || bad "the default prompt lost rule 2 (the measured anti-fabrication guard the angle design leans on)"
 grep -q 'The only reportable defect in this pass is a comment or docstring' "$SCRIPT" \
   && ok || bad "the angle pass lost its comments-only rule"
+grep -q 'requires constructible evidence' "$SCRIPT" \
+  && ok || bad "the verifier prompt lost its constructible-evidence rule (measured 8/8 refutation)"
 grep -q '# retries three times before giving up' "$SCRIPT" \
   && ok || bad "the angle pass lost its comment-anchored format example"
 
-# --- argument validation -----------------------------------------------------
+# --- the audit's finding export (--verify wiring) ----------------------------
+# The audit takes the findings dir as argv[3]; it must export each VALIDATED
+# block there on the exit-4 path only -- an empty argv[3] (VERIFY off), a
+# missing argv[3] (bench/tests), and a truncated exit-3 run all export nothing.
+FDIRT=$(mktemp -d "$TMP/findings.XXXXXX")
+RAW4=$(mktemp "$TMP/raw4.XXXXXX")
+{ printf '%s\n' '{"type":"tool_execution_end","isError":false}'
+  printf '%s\n' "{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"stopReason\":\"stop\",\"usage\":{\"totalTokens\":9},\"content\":[{\"type\":\"text\",\"text\":\"FILE: $TMP/quotegate.py:1 | confidence: high\\nQUOTE: the_real_line = 1\\nDEFECT: assigns a constant where a computed value is required\\nFAILURE: every caller sees 1\"}]}}"
+} > "$RAW4"
+/usr/bin/python3 "$TMP/audit.py" "$RAW4" 0 "$FDIRT" >/dev/null 2>&1
+rc=$?
+[ "$rc" -eq 4 ] && ok || bad "export fixture should exit 4 (got $rc)"
+[ -f "$FDIRT/finding-1.txt" ] && ok || bad "validated finding was not exported"
+grep -q '^QUOTE: the_real_line = 1$' "$FDIRT/finding-1.txt" \
+  && ok || bad "exported finding does not carry the block"
+n=$(ls "$FDIRT" | wc -l | tr -d ' ')
+[ "$n" -eq 1 ] && ok || bad "expected exactly 1 exported finding, got $n"
+# Empty argv[3] (the VERIFY=0 production value) writes nowhere -- especially
+# not into the cwd, which os.path.join("", ...) would silently target.
+( cd "$TMP" && /usr/bin/python3 "$TMP/audit.py" "$RAW4" 0 "" >/dev/null 2>&1 )
+[ ! -e "$TMP/finding-1.txt" ] && ok || bad "empty findings dir wrote into the cwd"
+# A truncated run (stopReason != stop) exits 3 and must not export even with a
+# dir supplied: the verifier must never see findings from an untrusted verdict.
+FDIRT2=$(mktemp -d "$TMP/findings2.XXXXXX")
+RAW3=$(mktemp "$TMP/raw3.XXXXXX")
+{ printf '%s\n' '{"type":"tool_execution_end","isError":false}'
+  printf '%s\n' "{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"stopReason\":\"length\",\"usage\":{\"totalTokens\":9},\"content\":[{\"type\":\"text\",\"text\":\"FILE: $TMP/quotegate.py:1 | confidence: high\\nQUOTE: the_real_line = 1\\nDEFECT: assigns a constant where a computed value is required\\nFAILURE: every caller sees 1\"}]}}"
+} > "$RAW3"
+/usr/bin/python3 "$TMP/audit.py" "$RAW3" 0 "$FDIRT2" >/dev/null 2>&1
+rc=$?
+[ "$rc" -eq 3 ] && ok || bad "truncated export fixture should exit 3 (got $rc)"
+[ -z "$(ls "$FDIRT2")" ] && ok || bad "a truncated (exit 3) run exported findings"
+
+# The two verifier prompts -- shipped (review.sh) and bench (run_verify.sh) --
+# are the SAME measured artifact; the bench numbers are only quotable while
+# they are byte-identical. The bench file exists only in the public repo, so
+# the mirror checkout SKIPs (counted -- a skip is not a pass).
+if [ -f "$ROOT/bench/run_verify.sh" ]; then
+  /usr/bin/python3 - "$SCRIPT" "$ROOT/bench/run_verify.sh" <<'PY'
+import sys
+def lit(path, marker):
+    src = open(path).read()
+    i = src.index(marker) + len(marker)
+    return src[i:src.index("'", i)]
+a = lit(sys.argv[1], "VERIFY_SYSTEM_PROMPT='")
+b = lit(sys.argv[2], "SYSTEM_PROMPT='")
+sys.exit(0 if a == b else 1)
+PY
+  [ $? -eq 0 ] && ok || bad "verifier prompt drifted between review.sh and bench/run_verify.sh"
+else
+  skip "verifier prompt parity: bench/run_verify.sh not in this checkout"
+fi
+
+# --- argument validation ---# --- argument validation -----------------------------------------------------
 # These run before any precondition, so they need neither a model nor a server.
 
 arg_is() { # $1=label  $2=expected exit  $3.. = args
@@ -291,6 +346,9 @@ arg_is "unknown angle is a usage error"     2 --angle bogus
 arg_is "--angle excludes --intent"          2 --angle stalecomment --intent x
 arg_is "--angle stalecomment parses"        1 --angle stalecomment --rounds abc
 arg_is "--angle empty value is a usage error" 2 --angle ""
+# --verify (docs/verify-flag.md): discriminator as for --angle -- exit 1 only
+# if the flag itself parsed and execution reached rounds validation.
+arg_is "--verify parses"                    1 --verify --rounds abc
 
 # --- the lock ----------------------------------------------------------------
 # Exercised through the script's own acquire_lock, sourced with everything
@@ -310,7 +368,7 @@ open(sys.argv[2], "w").write(
     "set -u\n"
     'die() { printf "die: %s\\n" "$1" >&2; exit 1; }\n'
     'note() { printf "note: %s\\n" "$1" >&2; }\n'
-    'RAW=""; LOADED_BY_US=0; LMS=/usr/bin/true; MODEL=stub\n'
+    'RAW=""; FDIR=""; LOADED_BY_US=0; LMS=/usr/bin/true; MODEL=stub\n'
     + src[start:end] + "\n"
 )
 PY
@@ -470,6 +528,50 @@ case "$out" in
   *) ok ;;
 esac
 [ "$rc" -eq 0 ] && ok || bad "stubbed clean review should exit 0, got $rc"
+
+# --- the all-refuted --verify path, end-to-end through a stubbed pi ----------
+# The one branch that can turn a defect-bearing run into exit 0. Call 1 (the
+# reviewer) emits a finding on a real file; call 2 (the verifier) refutes it
+# with a finished message. The run must exit 0, keep the finding on stdout as
+# evidence, and say 0/1 survived on stderr.
+VSTUBS="$TMP/vstubs"; mkdir -p "$VSTUBS"; cp "$STUBS/lms" "$VSTUBS/lms"
+cat > "$VSTUBS/pi" <<VPISTUB
+#!/usr/bin/env bash
+count_file="$TMP/vstub.count"
+n=\$( (cat "\$count_file" 2>/dev/null || echo 0) )
+echo \$((n + 1)) > "\$count_file"
+printf '%s\n' '{"type":"tool_execution_start"}'
+printf '%s\n' '{"type":"tool_execution_end","isError":false}'
+if [ "\$n" -eq 0 ]; then
+  printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":"stop","usage":{"totalTokens":9},"content":[{"type":"text","text":"FILE: a.py:1 | confidence: high\\nQUOTE: x = 1\\nDEFECT: the constant is wrong\\nFAILURE: callers see 1"}]}}'
+else
+  printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":"stop","usage":{"totalTokens":9},"content":[{"type":"text","text":"VERDICT: refuted\\nREASON: provably safe in this fixture"}]}}'
+fi
+VPISTUB
+chmod +x "$VSTUBS/pi"
+rm -f "$TMP/vstub.count"
+vout=$(cd "$REPO" && PATH="$VSTUBS:$PATH" HOME="$TMP/home" bash "$SCRIPT" --provider lmstudio --model qwen/qwen3-coder-30b --verify 2>"$TMP/vstub.err"); vrc=$?
+[ "$vrc" -eq 0 ] && ok || bad "all-refuted --verify run should exit 0, got $vrc"
+case "$vout" in *"VERDICT: refuted"*) ok ;; *) bad "refuted finding is not printed as evidence" ;; esac
+grep -q 'verify: 0/1' "$TMP/vstub.err" && ok || bad "the 0/1 survival note is missing from stderr"
+# And the reverse: a verifier that says real keeps exit 4.
+cat > "$VSTUBS/pi2" <<VPISTUB2
+#!/usr/bin/env bash
+count_file="$TMP/vstub2.count"
+n=\$( (cat "\$count_file" 2>/dev/null || echo 0) )
+echo \$((n + 1)) > "\$count_file"
+printf '%s\n' '{"type":"tool_execution_start"}'
+printf '%s\n' '{"type":"tool_execution_end","isError":false}'
+if [ "\$n" -eq 0 ]; then
+  printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":"stop","usage":{"totalTokens":9},"content":[{"type":"text","text":"FILE: a.py:1 | confidence: high\\nQUOTE: x = 1\\nDEFECT: the constant is wrong\\nFAILURE: callers see 1"}]}}'
+else
+  printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":"stop","usage":{"totalTokens":9},"content":[{"type":"text","text":"VERDICT: real\\nREASON: confirmed against the file"}]}}'
+fi
+VPISTUB2
+chmod +x "$VSTUBS/pi2"; mv "$VSTUBS/pi2" "$VSTUBS/pi"
+rm -f "$TMP/vstub2.count"
+( cd "$REPO" && PATH="$VSTUBS:$PATH" HOME="$TMP/home" bash "$SCRIPT" --provider lmstudio --model qwen/qwen3-coder-30b --verify >/dev/null 2>&1 ); vrc=$?
+[ "$vrc" -eq 4 ] && ok || bad "a surviving finding should keep exit 4, got $vrc"
 
 # The llamaserver reachability probe is not optional: without curl the bare
 # "Connection error" it exists to translate comes back instead.

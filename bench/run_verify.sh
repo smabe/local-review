@@ -63,14 +63,19 @@ for line in open(sys.argv[1]):
     except ValueError: continue
     m = e.get("message") or {}
     if e.get("type") == "message_end" and m.get("role") == "assistant":
+        if m.get("stopReason") != "stop" or m.get("isError"):
+            continue
         t = "".join(c.get("text", "") for c in m.get("content", []) if c.get("type") == "text")
         if t.strip(): txt = t
 print(txt)
 PY
-    # No sed alternation: BSD sed has no \| in basic regex. Strip + normalise,
-    # then whitelist.
-    verdict=$(sed -n 's/^VERDICT:[[:space:]]*//p' "$log" | tail -1 | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
-    case "$verdict" in real|refuted) ;; *) verdict=none ;; esac
+    # Retention-safe reduction, matching review.sh: any "real" line wins (the
+    # prompt's format reminder ends with "VERDICT: refuted", so an echoed
+    # template must not read as a refutation). No sed alternation (BSD sed).
+    verdicts=$(sed -n 's/^VERDICT:[[:space:]]*//p' "$log" | tr -d ' \t' | tr '[:upper:]' '[:lower:]' || true)
+    if printf '%s\n' "$verdicts" | grep -qx real; then verdict=real
+    elif printf '%s\n' "$verdicts" | grep -qx refuted; then verdict=refuted
+    else verdict=none; fi
     agree=0; [ "$verdict" = "$truth" ] && agree=1
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
       "$LABEL" "$item" "$run" "$verdict" "$truth" "$gating" "$secs" "$agree" | tee -a "$RESULTS"

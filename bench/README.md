@@ -28,6 +28,15 @@ stale-comment angle that SHIPPED — `docs/angle-stale-comment.md`).
 | `removedguard` | parser.py | a tidy `partition()` consolidation silently deletes the `if not key: raise` guard, so `"=value"` yields `{"": "value"}` instead of raising | the refactor-disguised removed guard; not in the default case list — run via `LOCAL_REVIEW_EVAL_CASES="removedguard"` |
 | `stalecomment` | parser.py | no code bug: duplicate keys switch from last-wins to first-wins (correct, intended), while the docstring still says "later duplicates win" | the stale-doc case. Scores only under `LOCAL_REVIEW_EVAL_CASES="stalecomment" LOCAL_REVIEW_EVAL_ARGS="--angle stalecomment"`; its meta `expected_exit=0` is calibrated for the DEFAULT pass (rule 2 bans the finding; measured 2/2, v7 instead misattributes the contradiction onto the correct code). The angle arm's success signature is exit 4 + `found=1`, scored by hand per docs/angle-stale-comment.md |
 
+**Scoring caveat for `--verify` arms** (`qwen38-nothink-vfy*` rows): run_eval's
+columns predate verification. `nfind` is scraped from the audit's stderr line,
+which reports the PRE-refutation count, and `found` requires exit 4 — so a run
+whose true catch was wrongly refuted records `exit=0 nfind=1 found=0
+found_any=1`, indistinguishable in the TSV from a formatting miss. Score
+verify arms from the logs (the `verify: N/M` stderr line and the VERDICT
+lines), never from the TSV alone. A verify-aware scorer is filed future work
+in docs/verify-flag.md.
+
 **Big diff** (`bigdiff/`, 18.3 KB over seven files) measures whether attention
 survives volume — whether three real bugs still get found inside a plausible
 refactor, or whether the model pattern-matches "competent work" and returns

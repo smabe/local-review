@@ -27,6 +27,8 @@ CONTEXT_LENGTH=49152
 ROUNDS=3
 INTENT=""
 ANGLE=""
+VERIFY=0
+FDIR=""
 RAW_STREAM=0
 RAW=""
 DIFF_TRUNCATION_BYTES=50000
@@ -59,6 +61,12 @@ usage: review.sh [--intent SENTENCE] [--angle NAME] [--rounds N] [--json]
                      docstrings the changed code contradicts) -- an opt-in
                      experiment, see docs/angle-stale-comment.md. Mutually
                      exclusive with --intent.
+  --verify           After the audit, adversarially re-check each validated
+                     finding with a second model pass and drop refuted ones
+                     from the verdict (they stay printed as evidence).
+                     Measured 14/14 retention, 8/8 refutation -- see
+                     docs/verify-flag.md. Opt-in; costs one generation per
+                     finding.
   --json             Print pi's raw JSON event stream instead of the review.
                      Every run is audited either way; this shows the evidence.
   --provider NAME    pi provider: llamaserver (default) or lmstudio.
@@ -69,7 +77,8 @@ usage: review.sh [--intent SENTENCE] [--angle NAME] [--rounds N] [--json]
 Exit status: 0 clean, 1 error, 2 usage, 3 the verdict cannot be trusted (the
 model read nothing, said nothing, or produced output that is neither a clean
 verdict nor well-formed findings), 4 defects were reported. Only 0 means
-clean -- never read a 3 or a 4 that way.
+clean -- never read a 3 or a 4 that way. With --verify, exit 0 can also mean
+"every finding was refuted"; the refuted blocks stay printed as evidence.
 USAGE
   exit 2
 }
@@ -78,6 +87,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --intent)   [ $# -ge 2 ] || usage; INTENT="$2"; shift 2 ;;
     --angle)    [ $# -ge 2 ] || usage; [ -n "$2" ] || usage; ANGLE="$2"; shift 2 ;;
+    --verify)   VERIFY=1; shift ;;
     --rounds)   [ $# -ge 2 ] || usage; ROUNDS="$2"; shift 2 ;;
     --json)     RAW_STREAM=1; shift ;;
     --provider) [ $# -ge 2 ] || usage; PROVIDER="$2"; shift 2 ;;
@@ -223,6 +233,7 @@ cleanup() {
     note "unloading $MODEL"
     "$LMS" unload "$MODEL" >/dev/null 2>&1 || note "unload failed -- '$LMS ps' to check"
   fi
+  if [ -n "$FDIR" ]; then rm -rf "$FDIR"; fi
   if [ -n "$LOCK" ]; then rm -rf "$LOCK"; fi  # last: the unload is what it guards
 }
 trap cleanup EXIT
@@ -387,6 +398,9 @@ run_pi() {
 # GNU coreutils requires at least three consecutive X's and errors out on a
 # template without them, which killed the run on Linux before pi ever started.
 RAW=$(mktemp "${TMPDIR:-/tmp}/local-review.XXXXXX") || die "could not create a temp file"
+if [ "$VERIFY" -eq 1 ]; then
+  FDIR=$(mktemp -d "${TMPDIR:-/tmp}/local-review-findings.XXXXXX") || die "could not create a temp dir"
+fi
 RC=0
 run_pi >"$RAW" || RC=$?
 
@@ -397,7 +411,7 @@ run_pi >"$RAW" || RC=$?
 # Audit the run rather than trusting its prose. Three things the model has
 # been measured getting wrong: appending "No findings." underneath real
 # findings (2 of 7 runs), returning empty output, and abandoning the format.
-python3 - "$RAW" "$RAW_STREAM" <<'PY' || AUDIT=$?
+python3 - "$RAW" "$RAW_STREAM" "$FDIR" <<'PY' || AUDIT=$?
 import json, os, re, sys
 
 texts, started, succeeded, peak = [], 0, 0, 0
@@ -524,7 +538,8 @@ def valid(match):
         return False
     return all(prose(match.group(g)) for g in ("defect", "failure"))
 
-blocks = sum(1 for m in BLOCK.finditer(review + "\n") if valid(m))
+valid_blocks = [m for m in BLOCK.finditer(review + "\n") if valid(m)]
+blocks = len(valid_blocks)
 well_formed = blocks > 0 and all(v == blocks for v in counts.values())
 defects = blocks if well_formed else 0
 
@@ -560,6 +575,18 @@ if defects:
     if mentions_clean:
         warn('the model appended "No findings." beneath %d real finding(s).' % defects)
         warn("The findings stand; the sentinel is a known tic of this model.")
+    # --verify wiring (docs/verify-flag.md): hand each VALIDATED block to the
+    # verifier loop. Placed HERE, after every trust gate, so a truncated or
+    # tool-less run (exit 3) never exports; and guarded, so a full disk cannot
+    # eat a review that was already produced -- the verdict outranks the export.
+    outdir = sys.argv[3] if len(sys.argv) > 3 else ""
+    if outdir:
+        try:
+            for i, m in enumerate(valid_blocks, 1):
+                with open(os.path.join(outdir, "finding-%d.txt" % i), "w") as fh:
+                    fh.write(m.group(0).strip() + "\n")
+        except OSError as e:
+            warn("could not export findings for --verify (%s) -- skipping verification" % e)
     sys.exit(4)
 if not clean_verdict:
     if any(counts.values()):
@@ -571,6 +598,93 @@ if not clean_verdict:
     sys.exit(3)
 PY
 AUDIT=${AUDIT:-0}
+
+# --- verification (opt-in, docs/verify-flag.md) ------------------------------
+# The verifier prompt is the measured artifact from the capability probe
+# (14/14 retention, 8/8 refutation) -- byte-identical with bench/run_verify.sh.
+VERIFY_SYSTEM_PROMPT='You are a review verifier. You do not write or fix code. You are given ONE finding from an earlier automated review of this repository, and your entire job is to decide whether it survives adversarial checking.
+Rules you must obey:
+1. First read the named file. If the quoted line does not appear in it, the finding is refuted -- a finding that cannot be located is not a finding.
+2. Re-derive the DEFECT claim from the code alone. Actively look for the guard, type, short-circuit, or call pattern that would make the claimed FAILURE impossible.
+3. Verdict "refuted" requires constructible evidence: name the exact line, guard, or language rule that defeats the claim. Plausible doubt is not evidence.
+4. If you cannot construct such a refutation, the verdict is "real" -- this pass exists to kill provably false findings, not to second-guess plausible ones.
+5. Judge only the finding you were given. Never report new defects.
+Your entire output is exactly two lines:
+VERDICT: real
+REASON: <one line>
+or
+VERDICT: refuted
+REASON: <one line>'
+
+# Section lines go to stdout normally, to stderr under --json: the raw event
+# stream is documented as pure JSONL and must stay parseable.
+vsay() {
+  if [ "$RAW_STREAM" -eq 1 ]; then printf '%s\n' "$*" >&2; else printf '%s\n' "$*"; fi
+}
+
+if [ "$VERIFY" -eq 1 ] && [ "$AUDIT" -eq 4 ]; then
+  survivors=0; vtotal=0
+  vsay ""
+  vsay "--- verification (--verify) ---"
+  # VRAW lives inside FDIR so the EXIT trap owns it; truncated each iteration.
+  VRAW="$FDIR/verify.raw"
+  for vf in "$FDIR"/finding-*.txt; do
+    if [ ! -e "$vf" ]; then continue; fi
+    vtotal=$((vtotal + 1))
+    VPROMPT="An automated reviewer of the uncommitted changes in this repository reported the finding below. Adversarially check it against the actual files.
+HARD BUDGET: at most 3 rounds of tool calls, then give your verdict.
+$(cat "$vf")"
+    pi --provider "$PROVIDER" --model "$MODEL" \
+      --no-session -nc -ns --exclude-tools edit,write \
+      --system-prompt "$VERIFY_SYSTEM_PROMPT" --mode json \
+      -p "$VPROMPT" </dev/null >"$VRAW" 2>/dev/null || true
+    # Same trust gate as the audit: only a FINISHED assistant message is a
+    # verdict. A reply truncated after "VERDICT: refuted" must not refute.
+    VTEXT=$(python3 - "$VRAW" <<'VPY'
+import json, sys
+txt = ""
+for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
+    try:
+        e = json.loads(line)
+    except ValueError:
+        continue
+    m = e.get("message") or {}
+    if e.get("type") == "message_end" and m.get("role") == "assistant":
+        if m.get("stopReason") != "stop" or m.get("isError"):
+            continue
+        t = "".join(c.get("text", "") for c in m.get("content", []) if c.get("type") == "text")
+        if t.strip():
+            txt = t
+print(txt)
+VPY
+) || VTEXT=""
+    # Retention-safe reduction: ANY "real" verdict line wins, because the
+    # prompt's own format reminder ends with "VERDICT: refuted" and an echoed
+    # template must not flip a real finding. No sed alternation (BSD sed).
+    verdicts=$(printf '%s\n' "$VTEXT" | sed -n 's/^VERDICT:[[:space:]]*//p' | tr -d ' \t' | tr '[:upper:]' '[:lower:]' || true)
+    if printf '%s\n' "$verdicts" | grep -qx real; then
+      verdict=real
+      reason=$(printf '%s\n' "$VTEXT" | sed -n 's/^REASON:[[:space:]]*//p' | head -1 || true)
+    elif printf '%s\n' "$verdicts" | grep -qx refuted; then
+      verdict=refuted
+      reason=$(printf '%s\n' "$VTEXT" | sed -n 's/^REASON:[[:space:]]*//p' | head -1 || true)
+    else
+      verdict=real
+      reason="no parseable verdict -- kept (fail-open on retention)"
+    fi
+    if [ "$verdict" = "real" ]; then survivors=$((survivors + 1)); fi
+    vsay "$(head -1 "$vf")"
+    vsay "  VERDICT: $verdict${reason:+ -- $reason}"
+  done
+  note "verify: $survivors/$vtotal finding(s) survived adversarial check"
+  if [ "$vtotal" -gt 0 ] && [ "$survivors" -eq 0 ]; then
+    note "all findings were refuted by the verifier -- exiting clean; the refuted"
+    note "blocks and the verifier reasons above are the evidence"
+    # Fall through to the single exit dispatcher below rather than exiting here:
+    # one place in this file maps state to exit status.
+    AUDIT=0
+  fi
+fi
 
 # The audit's verdict outranks pi's exit code: pi exits 0 both for a run that
 # returned nothing at all and for one that found real defects.

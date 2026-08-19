@@ -28,6 +28,7 @@ to get subtly wrong.
 | `--intent "<sentence>"` | you made the change and can state its purpose — read the caveat below first |
 | `--rounds N` | default 3; raise to 4–5 when the review needs a codebase search pass |
 | `--angle stalecomment` | opt-in single-class pass for stale comments/docstrings the changed code contradicts — the class the default pass is banned from reporting. Replaces the general review for that run: run it in addition to the default pass, never instead (its exit 0 says nothing about correctness bugs). Anchors findings on the comment line; mutually exclusive with `--intent` |
+| `--verify` | adversarially re-check each finding with a second model pass; refuted findings drop from the verdict (all-refuted → exit 0) but stay printed as evidence. Measured 14/14 retention / 8/8 refutation. One extra generation per finding |
 | `--json` | print pi's raw event stream instead of the review |
 | `--provider` / `--model` | switch engine/model — any id declared in `~/.pi/agent/models.json`, under `llamaserver` or `lmstudio`. E.g. `--provider lmstudio --model qwen/qwen3-coder-30b` for the ~5s fast tier on SMALL diffs (it false-cleans large ones) |
 
@@ -42,7 +43,7 @@ a lock for its whole load/review/unload cycle, and a second run started
 meanwhile exits immediately saying which process holds it.
 
 **Every run is audited**, and the exit status carries the verdict: **0** clean,
-**4** defects reported, **3** the verdict cannot be trusted. Only 0 means clean.
+**4** defects reported, **3** the verdict cannot be trusted. Only 0 means clean. (Exception under `--verify`: all findings refuted → exit 0, with the refuted blocks printed as evidence.)
 
 A 3 covers every way a run can look clean without being one:
 - no tool call **succeeded**, so the model read nothing (a tool that merely

@@ -20,7 +20,7 @@ gates a commit and never replaces a frontier-model review.
 ## Commands
 
 ```bash
-bash tests/test_local_review_audit.sh          # the suite (84 assertions); exit 0 = green
+bash tests/test_local_review_audit.sh          # the suite (98 assertions); exit 0 = green
 LOCAL_REVIEW_MIRROR=~/projects/abe-skills bash tests/test_local_review_audit.sh   # include the drift checks
 python3 scripts/test_local_review_scope.py     # legacy diff-pipe scope tests
 python3 scripts/test_local_review_scope.py DefaultScopeIncludesUntracked.test_empty_repo_falls_back_to_untracked_only   # one case
@@ -74,7 +74,9 @@ a failure that was measured, not anticipated:
 ### The exit contract
 
 `0` clean · `1` error · `2` usage · `3` the verdict cannot be trusted · `4`
-defects reported. **Only 0 means clean.** A 3 covers every way a run can look
+defects reported. **Only 0 means clean.** With `--verify`, an exit 0 can also
+mean "every finding was refuted by the verifier pass" — the refuted blocks and
+reasons are printed above the verdict either way (docs/verify-flag.md). A 3 covers every way a run can look
 clean without being one: no tool call *succeeded* (one that merely started
 proves nothing), the verdict message did not finish (`stopReason != stop` or
 `isError`), an empty response, a half-emitted finding block, or `No findings.`
