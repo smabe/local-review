@@ -289,11 +289,16 @@ alternatives.
   `Co-Authored-By:` trailer).
 - Stage explicit paths (no `git add -A`). **Never `git add` inside a bench
   fixture repo.**
+- **You are in a worktree.** `$WORKTREE_ROOT` is where git ops and edits happen;
+  `$PROJECT_ROOT` (the canonical checkout on `main`) is where clu's state lives,
+  which is why every `clu` callback below carries `--project "$PROJECT_ROOT"`.
+  Never `cd $PROJECT_ROOT` to commit — that lands the commit on `main` and the
+  next phase dispatches off a stale branch tip.
 - **Stamp attestations AFTER the commit** (the gate compares stamp SHA against
   HEAD):
-  - `clu verify --plan bench-row-hardening --phase <id> --token <T>`
-  - `clu attest --simplify --plan bench-row-hardening --phase <id> --token <T>`
-- `clu complete --plan bench-row-hardening --phase <id> --token <T>`.
+  - `clu verify --project "$PROJECT_ROOT" --plan bench-row-hardening --phase <id> --token <T>`
+  - `clu attest --simplify --project "$PROJECT_ROOT" --plan bench-row-hardening --phase <id> --token <T>`
+- `clu complete --project "$PROJECT_ROOT" --plan bench-row-hardening --phase <id> --token <T>`.
 
 ## Sessions index
 

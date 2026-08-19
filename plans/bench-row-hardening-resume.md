@@ -156,7 +156,7 @@ See `plans/bench-row-hardening.md` and `docs/bench-hardening-spec.md`. Summary:
      `tests/test_bench_runners.sh`.
    - After the commit: `clu verify` then `clu attest --simplify`, both with
      `--plan bench-row-hardening --phase resume --token <T>`.
-   - `clu complete --plan bench-row-hardening --phase resume --token <T>`.
+   - `clu complete --project "$PROJECT_ROOT" --plan bench-row-hardening --phase resume --token <T>`.
 
 ## Failure modes to watch
 

@@ -2,3 +2,6 @@ __pycache__/
 bench/eval-repo/
 bench/logs/
 bench/bigdiff-repo/
+
+# clu plan state (machine-local; the plan .md files are tracked)
+plans/.orchestrator/

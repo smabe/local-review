@@ -170,10 +170,10 @@ See `plans/bench-row-hardening.md` and `docs/bench-hardening-spec.md`. Summary:
      `bench/run_ctx_tiers.sh`, `bench/README.md`, `docs/verify-flag.md`,
      `CLAUDE.md`, `tests/test_bench_runners.sh` (+ the master if you logged a
      finding).
-   - After the commit: `clu verify --plan bench-row-hardening --phase snapshot
-     --token <T>` then `clu attest --simplify --plan bench-row-hardening
+   - After the commit: `clu verify --project "$PROJECT_ROOT" --plan bench-row-hardening --phase snapshot
+     --token <T>` then `clu attest --simplify --project "$PROJECT_ROOT" --plan bench-row-hardening
      --phase snapshot --token <T>`.
-   - `clu complete --plan bench-row-hardening --phase snapshot --token <T>`.
+   - `clu complete --project "$PROJECT_ROOT" --plan bench-row-hardening --phase snapshot --token <T>`.
 
 ## Failure modes to watch
 

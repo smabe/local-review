@@ -111,7 +111,7 @@ See `plans/bench-row-hardening.md` and `docs/bench-hardening-spec.md`. Summary:
      changed it.
    - After the commit: `clu verify` then `clu attest --simplify`, both with
      `--plan bench-row-hardening --phase scoring --token <T>`.
-   - `clu complete --plan bench-row-hardening --phase scoring --token <T>`.
+   - `clu complete --project "$PROJECT_ROOT" --plan bench-row-hardening --phase scoring --token <T>`.
 
 ## Failure modes to watch
 
