@@ -1107,9 +1107,9 @@ fi
 
 # --- a fail-fast structurally cannot emit a partial row ----------------------
 
-# The abort path lives above the per-run append in both runners, so there is no
-# ordering in which a refused attempt writes half a measurement row.
-for _r in run_eval.sh run_bigdiff.sh; do
+# The abort path lives above the per-run append in all three runners, so there
+# is no ordering in which a refused attempt writes half a measurement row.
+for _r in run_eval.sh run_bigdiff.sh run_verify.sh; do
     _abort_ln=$(grep -n 'exit "\$INFRA_EXIT"' "$ROOT/bench/$_r" | tail -1 | cut -d: -f1)
     _tee_ln=$(grep -n 'tee -a "\$RESULTS"' "$ROOT/bench/$_r" | head -1 | cut -d: -f1)
     if [ -n "$_abort_ln" ] && [ -n "$_tee_ln" ] && [ "$_abort_ln" -lt "$_tee_ln" ]; then
@@ -1301,6 +1301,324 @@ if [ "$(field "$RSST/results-bigdiff.tsv" 3 9)" = "SUSPECT" ]; then
     ok
 else
     bad "rescore cleared SUSPECT, which is a property of the run and not of the score"
+fi
+
+# --- run_verify.sh: an rc, a watchdog, and infrastructure status -------------
+
+# The verifier probe was the only runner invoking pi synchronously — no rc, no
+# watchdog. A dead server there yielded verdict=none and agree=0, recorded as
+# the verifier DISAGREEING with ground truth: a wrong answer rather than a
+# missing one, biasing the arm pessimistically with nothing in the row to catch
+# it.
+#
+# The seam here is PATH, not LOCAL_REVIEW_SH. This runner never invokes
+# review.sh — it drives `pi` directly — so a stub pi standing in front of the
+# real one is the injection point, the same shape
+# tests/test_local_review_audit.sh:490-511 already uses.
+#
+# The limit, stated rather than implied: everything below exercises the
+# runner's BOOKKEEPING. Nothing here proves that a real dead llama-server makes
+# `pi` exit non-zero with an empty event stream. What keeps that honest is that
+# the runner marks ANY run producing no assistant text, rather than matching a
+# failure signature it would have to guess at.
+
+mkdir -p "$TMP/pidir"
+cat > "$TMP/pidir/pi" <<'PISTUB'
+#!/usr/bin/env bash
+# PI_TEXT is emitted BEFORE PI_SLEEP deliberately: one stub then produces both
+# "killed with nothing to show" and "killed after a complete answer", which is
+# what pins the classifier's precedence between the two.
+if [ -n "${PI_MARKER:-}" ]; then echo RUN >> "$PI_MARKER"; fi
+if [ -n "${PI_TEXT:-}" ]; then
+  printf '{"type":"message_end","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"%s"}]}}\n' "$PI_TEXT"
+fi
+if [ -n "${PI_HOOK:-}" ] && [ -x "$PI_HOOK" ]; then "$PI_HOOK"; fi
+if [ -n "${PI_SLEEP:-}" ]; then sleep "$PI_SLEEP"; fi
+if [ -n "${PI_ERR:-}" ]; then printf '%s\n' "$PI_ERR" >&2; fi
+exit "${PI_RC:-0}"
+PISTUB
+chmod +x "$TMP/pidir/pi"
+
+# relocate_verify <workspace> <item>... — run_verify.sh with a narrowed item
+# list. The runner globs verify/items/*/ and takes no item-list override, so the
+# list is narrowed by replacing the wholesale `verify` symlink with a directory
+# holding symlinks to only the items a test needs. Thirteen items per batch
+# would make the watchdog case wait out thirteen timeouts, and a production knob
+# whose only caller is a test is the wrong way to buy that.
+relocate_verify() {
+    _vws="$1"; shift
+    relocate run_verify.sh "$_vws"
+    rm -f "$_vws/bench/verify"
+    mkdir -p "$_vws/bench/verify/items"
+    for _vi in "$@"; do
+        ln -s "$ROOT/bench/verify/items/$_vi" "$_vws/bench/verify/items/$_vi"
+    done
+}
+
+# One infrastructure exit across all three runners, or "re-run the identical
+# command" means something different depending on which one you ran.
+VFY_INFRA_RC=$(sed -n 's/^INFRA_EXIT=\([0-9][0-9]*\).*$/\1/p' "$ROOT/bench/run_verify.sh" | head -1)
+if [ -n "$VFY_INFRA_RC" ]; then ok; else bad "run_verify.sh does not define INFRA_EXIT"; fi
+if [ "$VFY_INFRA_RC" = "$INFRA_RC" ]; then
+    ok
+else
+    bad "run_verify.sh's INFRA_EXIT is '$VFY_INFRA_RC'; the other two runners use '$INFRA_RC'"
+fi
+VFY_INFRA_RC="${VFY_INFRA_RC:-75}"
+
+# A parseable verdict is a clean measurement: empty status, and `agree` scored
+# against ground truth exactly as before this phase.
+WS="$TMP/vfy-clean"
+relocate_verify "$WS" f1-stalecomment-misattr
+(
+    export PATH="$TMP/pidir:$PATH"
+    export PI_TEXT='VERDICT: refuted\nREASON: stub'
+    bash "$WS/bench/run_verify.sh" stub-provider stub-model 1 vfy-clean
+) > "$WS/driver.log" 2>&1
+rc=$?
+VC_TSV="$WS/bench/results-verify.tsv"
+
+if [ "$rc" -eq 0 ]; then ok; else bad "a clean verify batch exited $rc (see $WS/driver.log)"; fi
+if [ "$(field "$VC_TSV" 2 4)" = "refuted" ]; then ok; else bad "a parseable verdict recorded verdict='$(field "$VC_TSV" 2 4)'"; fi
+if [ -z "$(field "$VC_TSV" 2 9)" ]; then ok; else bad "a parseable verdict recorded status='$(field "$VC_TSV" 2 9)', expected empty"; fi
+# f1-stalecomment-misattr's truth is `refuted`, so a refuted verdict agrees.
+if [ "$(field "$VC_TSV" 2 8)" = "1" ]; then ok; else bad "a clean measurement recorded agree='$(field "$VC_TSV" 2 8)', expected 1"; fi
+
+# --- a dead server is not a disagreement -------------------------------------
+
+# The specific misreading this phase exists to remove. pi fails, produces no
+# assistant text, and the row must say so in `status` rather than leaving
+# agree=0 to be read as the verifier getting the answer wrong.
+WS="$TMP/vfy-dead"
+relocate_verify "$WS" f1-stalecomment-misattr
+(
+    export PATH="$TMP/pidir:$PATH"
+    export PI_RC=1 PI_ERR="Connection error"
+    bash "$WS/bench/run_verify.sh" stub-provider stub-model 1 vfy-dead
+) > "$WS/driver.log" 2>&1
+rc=$?
+VD_TSV="$WS/bench/results-verify.tsv"
+
+# Only the two pre-dispatch refusals are terminal; an unrecognised failure is
+# recorded and the batch carries on, same as in the other two runners.
+if [ "$rc" -eq 0 ]; then ok; else bad "an unrecognised verify failure aborted the batch (exit $rc)"; fi
+if [ "$(field "$VD_TSV" 2 9)" = "SUSPECT" ]; then ok; else bad "a failed pi recorded status='$(field "$VD_TSV" 2 9)', expected SUSPECT"; fi
+if [ -z "$(field "$VD_TSV" 2 8)" ]; then
+    ok
+else
+    bad "a run that never reached the model recorded agree='$(field "$VD_TSV" 2 8)'; it must be empty, never 0"
+fi
+
+# --- an unparseable answer is still a measurement ----------------------------
+
+# The model answered, it just did not answer in the required shape. That is a
+# model result worth keeping and a genuine disagreement -- the opposite fact
+# from the row above, and the two were indistinguishable before this phase.
+WS="$TMP/vfy-garbage"
+relocate_verify "$WS" f1-stalecomment-misattr
+(
+    export PATH="$TMP/pidir:$PATH"
+    export PI_TEXT='I had a look and it seems fine to me.'
+    bash "$WS/bench/run_verify.sh" stub-provider stub-model 1 vfy-garbage
+) > "$WS/driver.log" 2>&1
+rc=$?
+VG_TSV="$WS/bench/results-verify.tsv"
+
+if [ "$rc" -eq 0 ]; then ok; else bad "an unparseable-answer batch exited $rc (see $WS/driver.log)"; fi
+if [ "$(field "$VG_TSV" 2 4)" = "none" ]; then ok; else bad "an unparseable answer recorded verdict='$(field "$VG_TSV" 2 4)', expected none"; fi
+if [ -z "$(field "$VG_TSV" 2 9)" ]; then ok; else bad "an unparseable answer recorded status='$(field "$VG_TSV" 2 9)', expected empty"; fi
+if [ "$(field "$VG_TSV" 2 8)" = "0" ]; then ok; else bad "an unparseable answer recorded agree='$(field "$VG_TSV" 2 8)', expected the scored 0"; fi
+# The whole point: both rows carry verdict=none, and only `status` tells them
+# apart. A reader that cannot make this distinction reads infrastructure as a
+# model result.
+if [ "$(field "$VG_TSV" 2 4)" = "$(field "$VD_TSV" 2 4)" ] \
+   && [ "$(field "$VG_TSV" 2 9)" != "$(field "$VD_TSV" 2 9)" ]; then
+    ok
+else
+    bad "'nothing ran' and 'answered unparseably' are not distinguishable in the row:
+  nothing ran:  verdict='$(field "$VD_TSV" 2 4)' status='$(field "$VD_TSV" 2 9)'
+  unparseable:  verdict='$(field "$VG_TSV" 2 4)' status='$(field "$VG_TSV" 2 9)'"
+fi
+
+# --- the watchdog fires, and the batch continues -----------------------------
+
+# Keyed on a MARKER FILE, never on elapsed wall clock: date +%s advances across
+# a lid-close while sleep does not, so elapsed seconds alone would rewrite a
+# genuine verdict into a timeout after any suspend.
+WS="$TMP/vfy-timeout"
+relocate_verify "$WS" f1-stalecomment-misattr
+(
+    export PATH="$TMP/pidir:$PATH"
+    export LOCAL_REVIEW_VERIFY_TIMEOUT=2
+    export PI_SLEEP=45
+    bash "$WS/bench/run_verify.sh" stub-provider stub-model 1 vfy-timeout
+) > "$WS/driver.log" 2>&1
+rc=$?
+VT_TSV="$WS/bench/results-verify.tsv"
+
+if [ "$rc" -eq 0 ]; then ok; else bad "a timed-out verify batch exited $rc, expected 0 (a timeout is a recorded result)"; fi
+if [ "$(field "$VT_TSV" 2 9)" = "TIMEOUT" ]; then ok; else bad "a timed-out item recorded status='$(field "$VT_TSV" 2 9)', expected TIMEOUT"; fi
+if [ -z "$(field "$VT_TSV" 2 8)" ]; then ok; else bad "a timed-out item recorded agree='$(field "$VT_TSV" 2 8)', expected empty"; fi
+# It returned rather than hanging: the stub would have slept 45 s. The bound is
+# the stub's own sleep and not the 2 s timeout on purpose — where `pgrep -P`
+# cannot read the process table (a sandboxed CI or worker is one such place) the
+# deepest-descendant TERM finds no victim and the run is released by the
+# watchdog's 30 s grace instead. Both paths are the watchdog working; only
+# sitting through the full 45 s is not.
+if [ "$(field "$VT_TSV" 2 7)" -lt 45 ] 2>/dev/null; then
+    ok
+else
+    bad "a timed-out item took $(field "$VT_TSV" 2 7) s against a 2 s timeout; the watchdog did not release the batch"
+fi
+
+# Precedence: rc=124 is classified BEFORE the extracted-answer rule, so even a
+# complete verdict recovered from a killed run stays marked. `secs` on that row
+# is the watchdog's timeout rather than a latency, and unlike the other two
+# runners there is no `exit` column here to carry the 124 -- so the fact has
+# nowhere else to live.
+WS="$TMP/vfy-timeout-answered"
+relocate_verify "$WS" f1-stalecomment-misattr
+(
+    export PATH="$TMP/pidir:$PATH"
+    export LOCAL_REVIEW_VERIFY_TIMEOUT=2
+    export PI_TEXT='VERDICT: refuted\nREASON: answered, then hung'
+    export PI_SLEEP=45
+    bash "$WS/bench/run_verify.sh" stub-provider stub-model 1 vfy-tmo-ans
+) > "$WS/driver.log" 2>&1
+VTA_TSV="$WS/bench/results-verify.tsv"
+if [ "$(field "$VTA_TSV" 2 9)" = "TIMEOUT" ]; then
+    ok
+else
+    bad "a killed run whose answer survived recorded status='$(field "$VTA_TSV" 2 9)'; rc==124 must be classified before the answer rule"
+fi
+
+# --- server down at batch start: nothing dispatched, nothing recorded --------
+
+WS="$TMP/vfy-down"
+relocate_verify "$WS" f1-stalecomment-misattr f5-offbyone-guard
+(
+    export PATH="$TMP/pidir:$PATH"
+    export PI_TEXT='VERDICT: refuted\nREASON: stub'
+    export PI_MARKER="$WS/pi-ran.txt"
+    export LOCAL_REVIEW_LLAMA_URL="http://127.0.0.1:1/v1/models"
+    export LOCAL_REVIEW_PROBE_TRIES=2 LOCAL_REVIEW_PROBE_SLEEP=0
+    bash "$WS/bench/run_verify.sh" llamaserver stub-model 2 vfy-down
+) > "$WS/driver.log" 2>&1
+rc=$?
+VDN_TSV="$WS/bench/results-verify.tsv"
+
+if [ "$rc" -eq "$VFY_INFRA_RC" ]; then ok; else bad "a verify batch against a dead server exited $rc, expected $VFY_INFRA_RC"; fi
+if [ "$(wc -l < "$VDN_TSV" | tr -d ' ')" = "2" ]; then
+    ok
+else
+    bad "a dead-server verify batch wrote $(( $(wc -l < "$VDN_TSV") - 1 )) rows, expected exactly one terminal row"
+fi
+if [ "$(field "$VDN_TSV" 2 9)" = "SERVER-DOWN" ]; then ok; else bad "terminal row status is '$(field "$VDN_TSV" 2 9)', expected SERVER-DOWN"; fi
+if [ ! -e "$WS/pi-ran.txt" ]; then ok; else bad "a batch refused before dispatch still invoked pi"; fi
+# `gating` and `secs` are padded like the other runners' numeric columns, but
+# `agree` is not: a 0 there does not read as a placeholder, it reads as the
+# verifier disagreeing with ground truth. The other two can pad their
+# equivalents because summarize_ctx_tiers.py filters their abort rows out
+# first — results-verify.tsv has no reader to be protected by.
+if [ -z "$(field "$VDN_TSV" 2 8)" ]; then
+    ok
+else
+    bad "verify terminal row recorded agree='$(field "$VDN_TSV" 2 8)'; a padded 0 there asserts a disagreement that never happened"
+fi
+case "$(field "$VDN_TSV" 2 6)$(field "$VDN_TSV" 2 7)" in
+    *[!0-9]*) bad "verify terminal row put a non-numeric token in gating/secs: '$(field "$VDN_TSV" 2 6)' '$(field "$VDN_TSV" 2 7)'" ;;
+    "")       bad "verify terminal row left gating/secs empty; they are padded so a naive int() sweep survives" ;;
+    *)        ok ;;
+esac
+
+# The terminal row's shape, which phase `resume` rests on: a non-dispatchable
+# key, so an aborted batch cannot poison the item it failed on forever.
+if [ "$(field "$VDN_TSV" 2 3)" = "abort" ]; then ok; else bad "verify terminal row's run is '$(field "$VDN_TSV" 2 3)', expected the reserved token 'abort'"; fi
+if [ -z "$(field "$VDN_TSV" 2 2)" ]; then ok; else bad "verify terminal row's item is '$(field "$VDN_TSV" 2 2)', expected empty"; fi
+_keys=$(awk -F'\t' 'NR>1 && $1=="vfy-down" && $3 ~ /^[0-9]+$/ {print $3}' "$VDN_TSV")
+if [ -z "$_keys" ]; then ok; else bad "a numeric-run key scan matched the verify terminal row: '$_keys'"; fi
+
+# --- server dies mid-batch: the measured item keeps its row ------------------
+
+# A file:// endpoint the stub deletes during item 1, for the same reason as the
+# small-case test above: a worker sandbox may refuse bind(), and nothing in the
+# runner inspects the URL scheme, so `curl -sf "$LLAMA_URL"` takes the identical
+# path. What it does not cover is a server that accepts and answers slowly.
+VSRV="$TMP/vfy-endpoint"
+printf '{"data":[]}\n' > "$VSRV"
+WS="$TMP/vfy-mid"
+relocate_verify "$WS" f1-stalecomment-misattr
+cat > "$WS/kill-server.sh" <<VKILLHOOK
+#!/usr/bin/env bash
+rm -f "$VSRV"
+exit 0
+VKILLHOOK
+chmod +x "$WS/kill-server.sh"
+(
+    export PATH="$TMP/pidir:$PATH"
+    export PI_TEXT='VERDICT: refuted\nREASON: stub'
+    export PI_HOOK="$WS/kill-server.sh"
+    export LOCAL_REVIEW_LLAMA_URL="file://$VSRV"
+    export LOCAL_REVIEW_PROBE_TRIES=2 LOCAL_REVIEW_PROBE_SLEEP=0
+    bash "$WS/bench/run_verify.sh" llamaserver stub-model 3 vfy-mid
+) > "$WS/driver.log" 2>&1
+rc=$?
+VM_TSV="$WS/bench/results-verify.tsv"
+
+if [ "$rc" -eq "$VFY_INFRA_RC" ]; then ok; else bad "a verify batch whose server died mid-run exited $rc, expected $VFY_INFRA_RC (see $WS/driver.log)"; fi
+if [ "$(wc -l < "$VM_TSV" | tr -d ' ')" = "3" ]; then
+    ok
+else
+    bad "expected header + item 1 + one terminal row, got $(wc -l < "$VM_TSV") lines:
+$(cat "$VM_TSV")"
+fi
+if [ "$(field "$VM_TSV" 2 3)" = "1" ] && [ -z "$(field "$VM_TSV" 2 9)" ]; then
+    ok
+else
+    bad "the measured item's row is not intact: run='$(field "$VM_TSV" 2 3)' status='$(field "$VM_TSV" 2 9)'"
+fi
+if [ "$(field "$VM_TSV" 3 9)" = "SERVER-DOWN" ] && [ "$(field "$VM_TSV" 3 3)" = "abort" ]; then
+    ok
+else
+    bad "the mid-batch verify abort did not append a SERVER-DOWN terminal row"
+fi
+
+# --- the verifier prompt is still the FIRST SYSTEM_PROMPT=' in the file ------
+
+# tests/test_local_review_audit.sh:305-318 locates the bench verifier prompt by
+# the first occurrence of that marker anywhere in the file -- a substring match,
+# so any variable whose NAME ends in SYSTEM_PROMPT=' placed above it silently
+# redirects the comparison while staying green. That parity check is the only
+# thing keeping the bench verifier numbers quotable, so assert the premise here
+# where a failure is loud.
+python3 - "$ROOT/bench/run_verify.sh" > "$TMP/vfy-prompt.txt" 2>&1 <<'PY'
+import sys
+
+src = open(sys.argv[1]).read()
+marker = "SYSTEM_PROMPT='"
+i = src.index(marker) + len(marker)
+lit = src[i:src.index("'", i)]
+if not lit.startswith("You are a review verifier."):
+    sys.exit("the first SYSTEM_PROMPT=' in run_verify.sh opens "
+             f"{lit[:60]!r}, not the verifier prompt")
+PY
+if [ $? -eq 0 ]; then
+    ok
+else
+    bad "run_verify.sh's verifier prompt is no longer the first SYSTEM_PROMPT=' in the file:
+$(cat "$TMP/vfy-prompt.txt")"
+fi
+
+# --- run_ctx_tiers.sh does not dispatch the verifier probe -------------------
+
+# The premise behind LOCAL_REVIEW_VERIFY_TIMEOUT being absent from that
+# orchestrator's unset list: it dispatches run_eval.sh and run_bigdiff.sh only,
+# so a run_verify.sh-only knob there would be a dead entry. If that ever stops
+# being true the omission becomes a real hole, and this is where it surfaces.
+if grep -q 'run_verify.sh' "$ROOT/bench/run_ctx_tiers.sh"; then
+    bad "run_ctx_tiers.sh now references run_verify.sh; its unset list must gain that runner's knobs"
+else
+    ok
 fi
 
 # --- the harness never writes into the real bench/ ---------------------------

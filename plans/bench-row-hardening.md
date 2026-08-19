@@ -469,6 +469,45 @@ plus one worktree prober that built phase `snapshot` for real.
   out of `pi` directly. What DOES transfer verbatim is the row shape: `run=abort`
   with an empty `item`, one terminal row, exit 75, and the numeric columns padded
   because no reader indexes that row.
+- **2026-08-19 (verify-runner).** The allowlist in `run_verify.sh` is **"a
+  finished assistant answer was extracted"**, not "a `VERDICT:` line was
+  parsed". The sub-plan said the latter, and it is wrong: an unparseable answer
+  has no `VERDICT:` line either, so that rule marks the one case the phase's own
+  acceptance requires to stay unmarked. Two traps in implementing it. The
+  extractor ends in a bare `print(txt)`, so a run that produced nothing still
+  leaves a one-byte file and `[ -s ]` calls every dead server a measurement —
+  test for non-whitespace content instead. And `results-verify.tsv` has no
+  `exit` column, so a `124` has nowhere to live; this runner therefore records
+  `status=TIMEOUT` where the other two record 124 in `exit` and leave `status`
+  empty. `TIMEOUT` describes the RUN, so it is deliberately **out** of
+  `rescore_bigdiff.py`'s `SCORING_MARKERS`.
+- **2026-08-19 (verify-runner).** **`pgrep -P` returns nothing for a real child
+  under a clu worker's Bash sandbox** (measured directly, not inferred). All
+  three watchdogs walk to the deepest descendant with it, so under the sandbox
+  that walk finds no victim and a timed-out run is released by the 30-second
+  grace TERM instead of promptly — correct, just slower. Any test asserting
+  elapsed time around a watchdog must bound on the stub's own sleep, never on
+  the timeout, or it fails on the sandbox rather than on the code. This says
+  nothing about a real bench run on the operator's shell, where `pgrep -P`
+  works.
+- **2026-08-19 (verify-runner).** For **phase 6**, a concrete case its filter
+  must cover, found by `/code-review` on this phase: `summarize_ctx_tiers.py`
+  never consults `status` at all. `measurements()` drops only the
+  non-dispatchable `run=abort` rows, so an OOM-killed small case
+  (`exit=137 found=0 status=SUSPECT`) stays in the catch denominator and the
+  latency median, while the untrusted-verdicts table — which filters exits 1/3/124
+  — never surfaces it. Worst on the `clean` case: a `SUSPECT` clean run is
+  neither `fab` nor `unusable`, so the fabrication check reports **passed** for a
+  run that never happened. `watch_ctx_tiers.py` received exactly this gate
+  already (`:95`, `:118`); its sibling, edited in the same commit, did not.
+- **2026-08-19 (verify-runner).** The terminal abort row in `run_verify.sh` pads
+  `gating`/`secs` with 0 but leaves **`agree` empty**, unlike the padded numeric
+  columns in the other two runners. The rule this establishes: pad a cell whose
+  0 is a placeholder, leave empty a cell whose 0 is a false STATEMENT. The other
+  two get away with padding because `summarize_ctx_tiers.py` filters their abort
+  rows out before any reader sees them; `results-verify.tsv` has no reader at
+  all, so nothing would catch it. **Phase 5 should apply the same test** to any
+  cell it pads.
 - **2026-08-19 (schema).** A batch that cannot checksum its script exits **2**,
   reusing the existing "refused before dispatch, nothing recorded" code rather
   than inventing one. Phase 3 introduces a distinct infrastructure exit code and

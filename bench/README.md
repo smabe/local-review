@@ -178,11 +178,17 @@ row means what it says.
   | `LOCKED` | another local review holds the model | **one terminal row, batch aborts** |
   | `EMPTY-LOG` | the run finished but its transcript is empty | per run |
   | `SCORE-ERROR` | the transcript exists and `score_bigdiff.py` crashed on it | per run |
+  | `TIMEOUT` | the watchdog fired (`run_verify.sh` only) | per run |
   | `SUSPECT` | non-zero exit, no audit footer, no known signature | per run |
+
+  `TIMEOUT` exists only in `results-verify.tsv`, and only because that file has
+  no `exit` column for a `124` to live in — the other two runners record the
+  same fact there and leave `status` empty.
 
   A marked row leaves its measurement columns **empty** rather than zero:
   `hits=0` is indistinguishable from a review that matched none of the six
-  known bugs, and `bugs` is parsed as a list of bug ids. Historical rows carry
+  known bugs, `agree=0` is indistinguishable from the verifier getting the
+  answer wrong, and `bugs` is parsed as a list of bug ids. Historical rows carry
   `EMPTY-LOG` / `SCORE-ERROR` in `bugs` instead, from before this column
   existed — see the cross-era note below.
 
@@ -265,6 +271,48 @@ exactly as if the probe did not exist. It also retries rather than deciding on
 one attempt, because a loaded machine mid-prefill does not answer promptly and
 killing a healthy 40-minute arm on a false negative loses more evidence than
 the probe protects.
+
+### The verifier probe runner is the same, minus three things
+
+`run_verify.sh` drives `pi` directly and never invokes `review.sh`. It carries
+the same `INFRA_EXIT` of `75`, the same retrying pre-dispatch probe, the same
+one-terminal-row abort, and the same watchdog — a wedged item is `status`
+`TIMEOUT` and the batch carries on. Three differences, all deliberate, none of
+them oversights:
+
+- **No review-script snapshot.** There is no `review.sh` in this runner's path
+  to freeze. Its `sha` is its own checksum, because the artifact under
+  measurement here is the verifier prompt inside it.
+- **No `vsurv` / `vtotal`.** It *is* the verifier probe; `verdict` already
+  carries the signal those two columns add elsewhere.
+- **No `LOCKED`, and no audit-footer allowlist.** `review.sh`'s lock guards
+  `review.sh`; this runner never takes it and never sees its refusal, so that
+  signature cannot appear. In place of the footer, the allowlist is the thing
+  `pi` is here to produce: **a finished assistant answer**. A run whose extract
+  is empty never reached the model and is marked; a run that answered in the
+  wrong shape did, and is a model result worth keeping.
+
+That last one is what makes `verdict=none` readable. It used to mean both "the
+model answered something unparseable" and "nothing ran at all". Now the second
+carries a non-empty `status` and the first does not — and `agree` is **empty**
+on any marked row, never `0`, because a `0` there records the verifier as
+*disagreeing with ground truth*: a wrong answer standing in for a missing one,
+biasing the arm pessimistically with nothing in the row to catch it.
+
+That rule reaches the terminal row too. It pads `gating` and `secs` with `0`
+like the other two runners, but leaves `agree` **empty** — a padded `0` there
+would not read as a placeholder. The other two can pad their equivalents
+because `summarize_ctx_tiers.py` filters their abort rows out before anything
+reads them; `results-verify.tsv` has no such reader to be protected by.
+
+A concurrent `review.sh` holding the model is still a hazard for a verify batch.
+It is one this runner cannot observe, and it is not covered.
+
+`LOCAL_REVIEW_VERIFY_TIMEOUT` (default 600 s, roughly 4× the slowest item
+observed at 49152) is the only knob that is **not** in `run_ctx_tiers.sh`'s
+unset list: that orchestrator dispatches the two review runners and never this
+one, so the entry would be dead. The test suite asserts that premise rather than
+trusting it.
 
 Verdict transcripts in `logs/` are the durable evidence; the TSVs are a derived
 cache. `rescore_bigdiff.py` rebuilds them, which is what makes a mid-run scoring

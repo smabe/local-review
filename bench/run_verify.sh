@@ -12,6 +12,13 @@
 # elsewhere, and a permanently-empty column trains readers to skim past
 # emptiness -- after which a genuine parse failure in a verify arm reads as
 # normal.
+#
+# `verdict=none` alone no longer says what happened. It used to mean both "the
+# model answered something unparseable" and "nothing ran at all"; the second now
+# carries a non-empty `status` and the first does not. `agree` is EMPTY on any
+# marked row, never 0 -- a 0 there reads as the verifier disagreeing with ground
+# truth, which turns a missing answer into a wrong one and biases the arm
+# pessimistically with nothing in the row to catch it.
 set -uo pipefail
 
 EVAL_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -53,6 +60,121 @@ fi
 RUN_SHA="${RUN_SHA:0:12}"
 echo "run_verify.sh: $SELF (sha256 $RUN_SHA)" >&2
 
+# --- infrastructure failures are not model failures --------------------------
+#
+# Same purpose as in run_eval.sh and run_bigdiff.sh, one step different. Those
+# two allowlist review.sh's audit footer; this runner never invokes review.sh,
+# so there is no footer here and NEITHER of its refusal signatures can ever
+# appear -- failures arrive out of `pi` directly. The allowlist is therefore the
+# thing pi is here to produce: a finished assistant answer. The extractor in the
+# loop below already drops messages that did not finish (stopReason != stop) or
+# errored, so a non-empty extract means the model answered -- whether or not it
+# answered in the shape the prompt demanded.
+#
+# There is no LOCKED analogue for the same reason. review.sh's lock guards
+# review.sh; this runner never takes it and never sees its refusal, so a grep
+# for that signature would be a pattern that cannot match. A concurrent review
+# is still a hazard here, and it is one this runner cannot observe.
+#
+# EX_TEMPFAIL, and the same value the other two use: nothing was measured and
+# nothing recorded, so re-running the identical command is the fix. Deliberately
+# not the existing exit 2, which means "the fixture is invalid, do not resume".
+INFRA_EXIT=75
+# Prior verify items ran 100-149 s at 49152 against the measured reviewer, so
+# this is roughly 4x the slowest one observed. NOT the small-case runner's 900 s
+# default: a verifier item is a single finding and is much faster, and 900 s
+# would score a genuinely stuck item as a fifteen-minute measurement.
+#
+# Deliberately NOT added to run_ctx_tiers.sh's unset list. That orchestrator
+# dispatches run_eval.sh and run_bigdiff.sh only, so a run_verify.sh-only knob
+# there would be a dead entry; tests/test_bench_runners.sh asserts that premise
+# rather than leaving it to a reader.
+TIMEOUT="${LOCAL_REVIEW_VERIFY_TIMEOUT:-600}"
+# Same default and same override as scripts/review.sh:38 and the other two
+# runners, because it is the same probe against the same endpoint.
+LLAMA_URL="${LOCAL_REVIEW_LLAMA_URL:-http://localhost:8080/v1/models}"
+PROBE_TRIES="${LOCAL_REVIEW_PROBE_TRIES:-5}"
+PROBE_SLEEP="${LOCAL_REVIEW_PROBE_SLEEP:-15}"
+
+# classify_run RC ANSWER -- print the row's `status`. THE ORDER IS LOAD-BEARING.
+classify_run() {
+  # 1. A timeout first, and for a reason the other two runners do not share:
+  #    results-verify.tsv has no `exit` column, so a 124 has nowhere else to
+  #    live. `secs` on such a row is the watchdog's timeout rather than a
+  #    latency, so even an answer recovered from a killed run is not a clean
+  #    measurement -- hence this precedes the answer rule rather than following
+  #    it.
+  if [ "$1" -eq 124 ]; then printf 'TIMEOUT'; return 0; fi
+  # 2. The model produced a finished answer, so a measurement happened. An
+  #    answer in the wrong SHAPE is still a model result worth keeping: it
+  #    reads as verdict=none with an empty status, and only "nothing ran at
+  #    all" is marked.
+  #
+  #    Tested for non-whitespace content, NOT with -s: the extractor below ends
+  #    in a bare `print(txt)`, so a run that produced nothing still leaves a
+  #    one-byte file behind and -s would call every dead server a measurement.
+  if grep -q '[^[:space:]]' "$2" 2>/dev/null; then return 0; fi
+  # 3. The open bucket, and it is not optional: a dead server, an OOM, a pi
+  #    crash and a model-unload race all arrive here indistinguishable from
+  #    each other. It fires on a clean exit too -- pi cannot exit 0 with
+  #    nothing to show and have measured anything.
+  printf 'SUSPECT'
+}
+
+# abort_infra STATUS -- one terminal row, then stop the batch.
+#
+# ONE row: zero would make a truncated arm indistinguishable from a deliberately
+# short one, and one row per remaining item is the junk-rows incident this
+# whole workstream exists to prevent.
+#
+# The row is not a measurement and MUST NOT occupy a dispatchable key. `run`
+# carries the reserved non-numeric token `abort` and `item` is empty, so a
+# key-existence scan over numeric `run` values can never match it.
+#
+# `gating` and `secs` are padded with 0 rather than left empty, matching the
+# other two runners: nothing indexes this row, and a bare int() sweep over a
+# label stays alive. `agree` is the one exception and is left EMPTY, because a
+# padded 0 there does not read as a placeholder -- it reads as the verifier
+# disagreeing with ground truth, which is the false fact this whole phase
+# exists to stop the file from asserting. The other two runners can pad their
+# equivalents because summarize_ctx_tiers.py filters their abort rows out
+# first; results-verify.tsv has no such reader to be protected by.
+abort_infra() {
+  echo "run_verify.sh: $1 -- infrastructure failure, nothing recorded for this attempt." >&2
+  echo "run_verify.sh: fix the cause, then re-run the identical command (exit $INFRA_EXIT)." >&2
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$LABEL" "" "abort" "" "" "0" "0" "" \
+    "$1" "$(date +%F)" "$RUN_SHA" >> "$RESULTS"
+  exit "$INFRA_EXIT"
+}
+
+# probe_server -- is anything answering, checked BETWEEN items.
+#
+# It proves a port answers and NOTHING more: not that the labelled model is
+# loaded, not that a generation will succeed. The classifier above still has to
+# fail closed exactly as if this did not exist.
+#
+# Retried rather than single-shot: a loaded machine mid-prefill does not answer
+# promptly, and killing a healthy arm on one false negative is self-inflicted
+# evidence loss.
+probe_server() {
+  # Only llamaserver serves this endpoint. An lmstudio arm is covered by the
+  # classifier alone, which is where a dead LM Studio surfaces anyway -- as a
+  # pi failure with nothing to show.
+  if [ "$PROVIDER" != "llamaserver" ]; then return 0; fi
+  # A missing curl is not an infrastructure abort: it would bury the real cause
+  # under a probe that never ran.
+  if ! command -v curl >/dev/null 2>&1; then return 0; fi
+  _try=1
+  while :; do
+    if curl -sf --max-time 10 "$LLAMA_URL" >/dev/null 2>&1; then return 0; fi
+    if [ "$_try" -ge "$PROBE_TRIES" ]; then return 1; fi
+    _try=$((_try + 1))
+    echo "run_verify.sh: nothing answering at $LLAMA_URL, retry $_try/$PROBE_TRIES" >&2
+    sleep "$PROBE_SLEEP"
+  done
+}
+
 mkdir -p "$EVAL_DIR/logs"
 if [ ! -d "$REPO/.git" ]; then
   mkdir -p "$REPO"; cp "$EVAL_DIR"/base/*.py "$REPO/"
@@ -63,6 +185,11 @@ fi
 
 for run in $(seq 1 "$RUNS"); do
   for dir in "$EVAL_DIR"/verify/items/*/; do
+    # Before the fixture is applied, before a log exists, before anything is
+    # dispatched: an attempt refused here must leave no artifact that could be
+    # mistaken for a run, and no per-item row at all.
+    probe_server || abort_infra SERVER-DOWN
+
     item="$(basename "$dir")"
     fixture=""; truth=""; gating=""
     while IFS='=' read -r k v; do
@@ -81,8 +208,34 @@ $(cat "$dir/finding.txt")"
     ( cd "$REPO" && pi --provider "$PROVIDER" --model "$MODEL" \
         --no-session -nc -ns --exclude-tools edit,write \
         --system-prompt "$SYSTEM_PROMPT" --mode json -p "$PROMPT" </dev/null ) \
-      > "$log.raw" 2> "$log.err"
+      > "$log.raw" 2> "$log.err" &
+    wpid=$!
+    # Watchdog, mirrored from run_eval.sh:67-94. Without it a wedged pi hangs
+    # the whole batch; without the rc below, a dead server was recorded as the
+    # verifier disagreeing with ground truth.
+    ( sleep "$TIMEOUT"
+      # Marker first: rc=124 keys on the watchdog FIRING, not on wall clock --
+      # date +%s advances across a suspend while sleep does not, so elapsed
+      # seconds alone would rewrite a genuine verdict into a timeout after any
+      # lid-close.
+      : > "$log.timeout"
+      # TERM the deepest descendant first: pi is a node script (process name
+      # "node", never "pi"), so the generation process itself must die before
+      # the wrapper is signalled. Never a machine-wide pkill, and never a KILL.
+      victim="$wpid"
+      while :; do
+        child=$(pgrep -P "$victim" 2>/dev/null | head -1)
+        if [ -z "$child" ]; then break; fi
+        victim="$child"
+      done
+      if [ "$victim" != "$wpid" ]; then kill -TERM "$victim" 2>/dev/null; fi
+      sleep 30
+      kill -TERM "$wpid" 2>/dev/null
+    ) & killer=$!
+    wait "$wpid"; rc=$?
+    kill "$killer" 2>/dev/null; wait "$killer" 2>/dev/null
     secs=$(( $(date +%s) - t0 ))
+    if [ -f "$log.timeout" ]; then rc=124; rm -f "$log.timeout"; fi
 
     # Last assistant text block only -- tool results also arrive as message_end.
     python3 - "$log.raw" <<'PY' > "$log"
@@ -107,9 +260,16 @@ PY
     elif printf '%s\n' "$verdicts" | grep -qx refuted; then verdict=refuted
     else verdict=none; fi
     agree=0; [ "$verdict" = "$truth" ] && agree=1
-    # Empty until this runner gets an rc and a watchdog (phase verify-runner);
-    # it invokes pi synchronously today, so there is nothing yet to classify.
-    status=""
+    # Classified from the rc and the EXTRACTED answer, never from the raw
+    # stream: a stream with events in it but no finished assistant message is
+    # not an answer.
+    status=$(classify_run "$rc" "$log")
+    # A marked row is not a measurement, so the scored cell is left empty rather
+    # than 0. agree=0 reads as the verifier disagreeing with ground truth, which
+    # turns a missing answer into a wrong one -- the exact misreading this whole
+    # phase exists to remove. `verdict` is left as extracted: it is a raw
+    # observation, and `none` beside a non-empty status is unambiguous.
+    if [ -n "$status" ]; then agree=""; fi
     # Per row, never hoisted: 13 items x N runs is a long batch.
     rowdate=$(date +%F)
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
