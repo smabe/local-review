@@ -1,0 +1,4 @@
+FILE: store.py:47 | confidence: high
+QUOTE:         return keys[-n - 1:-1]
+DEFECT: The slice drops the most recently inserted key and includes one extra older key. The dict preserves insertion order, so the n most recent keys are `keys[-n:]`; `keys[-n-1:-1]` instead returns the n keys immediately preceding the newest one.
+FAILURE: After `set("a",1); set("b",2); set("c",3)`, `recent_keys(2)` returns `['a', 'b']` instead of `['b', 'c']` — the most recent key is omitted and a stale one is included. Likewise with 3 keys, `recent_keys(5)` returns only `['a', 'b']` instead of all three.

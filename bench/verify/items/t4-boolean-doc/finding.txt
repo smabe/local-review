@@ -1,0 +1,4 @@
+FILE: parser.py:34 | confidence: high
+QUOTE:     """Raise ValueError naming every required key that is missing or empty."""
+DEFECT: The docstring claims the function raises ValueError naming required keys that are missing or empty, but the code on line 35 builds the list with `k in config and config[k]`, which selects keys that ARE present and non-empty; genuinely missing or empty keys are never included, and the raised error names the wrong keys.
+FAILURE: A caller validating `config={"host": "x"}` against `required=["host", "port"]` expects a ValueError naming "port" (missing); instead the function raises "missing required config: host", blaming the key that is correctly set and silently passing the actually missing one when it is the only problem key.

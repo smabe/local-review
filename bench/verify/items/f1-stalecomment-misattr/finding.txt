@@ -1,0 +1,4 @@
+FILE: parser.py:22 | confidence: high
+QUOTE:         if key in result:
+DEFECT: The added `if key in result: continue` makes the first occurrence of a key win, directly contradicting the function's documented purpose "later duplicates win" (and the normal dict-assignment semantics the code previously had).
+FAILURE: parse_config("A=1\nA=2") returns {'A': '1'} instead of the documented {'A': '2'}, silently discarding the later value.

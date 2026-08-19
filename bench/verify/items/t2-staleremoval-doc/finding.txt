@@ -1,0 +1,4 @@
+FILE: parser.py:8 | confidence: high
+QUOTE:     Raises ValueError on malformed lines.
+DEFECT: The docstring claims malformed lines raise ValueError, but this change replaced the `raise ValueError(...)` for lines without "=" with `continue  # tolerate junk lines from hand-edited configs`, so such lines are now silently skipped; the function only still raises for lines with an empty key.
+FAILURE: A caller relying on the documented ValueError to detect a corrupted config (e.g. `parse_config("this line has no equals\n")`) gets `{}` with the junk line silently dropped instead of an exception.

@@ -1,0 +1,4 @@
+FILE: parser.py:5 | confidence: high
+QUOTE:     """Return a dict of config values; later duplicates win.
+DEFECT: The docstring claims later duplicates win, but the newly added code does `if key in result: continue`, which skips any key already seen, so the first occurrence wins and later duplicates are ignored.
+FAILURE: A caller parsing "KEY=old\nKEY=new" expecting the documented "new" value gets "old" instead, silently using stale configuration.

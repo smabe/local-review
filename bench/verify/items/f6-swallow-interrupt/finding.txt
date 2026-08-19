@@ -1,0 +1,4 @@
+FILE: store.py:16 | confidence: high
+QUOTE:             except (json.JSONDecodeError, OSError):
+DEFECT: This handler also swallows KeyboardInterrupt raised while the store file is being read, so a Ctrl-C during startup is silently ignored and the process continues with an empty store.
+FAILURE: An operator interrupts a slow startup with Ctrl-C; instead of exiting, the process comes up with an empty store and the next write overwrites the real file.

@@ -1,0 +1,4 @@
+FILE: store.py:42 | confidence: medium
+QUOTE:         if n <= 0:
+DEFECT: The guard only catches n == 0; a negative n falls through to the slice, and keys[-n - 1:-1] with negative n selects keys from the wrong end of the store.
+FAILURE: recent_keys(-2) on a store holding ["a", "b", "c"] returns keys from the front of the insertion order instead of the empty list the API implies.

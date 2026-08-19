@@ -1,0 +1,4 @@
+FILE: parser.py:16 | confidence: high
+QUOTE:             continue  # tolerate junk lines from hand-edited configs
+DEFECT: This line silently skips any line lacking '=' instead of raising, contradicting parse_config's documented contract ("Raises ValueError on malformed lines"); no caller in the repo relies on the new lenient behavior.
+FAILURE: A config with a typo'd line such as "maxconn 100" (missing '=') is silently ignored, so parse_config returns a dict without "maxconn" and downstream code (e.g. merge_defaults) silently falls back to a default instead of failing on the malformed config.

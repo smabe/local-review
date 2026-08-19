@@ -1,0 +1,4 @@
+FILE: example/demo.py:3 | confidence: high
+QUOTE: # retries three times before giving up
+DEFECT: The comment claims three retries; the request below runs once with no retry.
+FAILURE: A reader trusting the comment ships code that breaks on the first transient error.

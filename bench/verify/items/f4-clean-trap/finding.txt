@@ -1,0 +1,4 @@
+FILE: parser.py:14 | confidence: high
+QUOTE:         if not line or line[0] in "#;":
+DEFECT: `line[0]` is evaluated on the stripped line, and for a blank input line the string is empty, so indexing position 0 raises IndexError instead of skipping the line.
+FAILURE: parse_config("a=1\n\nb=2") raises IndexError on the blank middle line instead of returning {'a': '1', 'b': '2'}.

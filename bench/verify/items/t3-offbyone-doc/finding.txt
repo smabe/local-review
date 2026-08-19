@@ -1,0 +1,4 @@
+FILE: store.py:42 | confidence: high
+QUOTE:         """Return the n most recently inserted keys, oldest first."""
+DEFECT: The docstring claims the method returns the n most recently inserted keys, but `return keys[-n - 1:-1]` slices off the last element of the insertion-ordered dict, so it returns the n keys immediately before the newest one, excluding the most recently inserted key.
+FAILURE: With keys inserted in order a, b, c, d, e, a reader calling `recent_keys(2)` expecting ['d', 'e'] gets ['c', 'd']; with 3 keys and n=5 they get only 2 keys instead of all 3.

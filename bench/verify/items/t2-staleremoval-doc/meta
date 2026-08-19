@@ -1,0 +1,3 @@
+fixture=staleremoval
+truth=real
+gating=1

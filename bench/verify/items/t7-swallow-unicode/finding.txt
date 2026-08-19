@@ -1,0 +1,4 @@
+FILE: store.py:16 | confidence: medium
+QUOTE:             except (json.JSONDecodeError, OSError):
+DEFECT: The except clause does not cover `UnicodeDecodeError`, which `json.load` raises when the file contains invalid UTF-8 bytes (it is a `ValueError` subclass, not a `JSONDecodeError` or `OSError`). A corrupt store file therefore still crashes `__init__`, defeating the change's stated purpose that a corrupt store starts empty rather than crashing.
+FAILURE: With the store file containing bytes b'\xff\xfe\x00{', `Store(path)` raises `UnicodeDecodeError: 'utf-8' codec can't decode byte 0xff in position 0` instead of constructing with an empty `_data` dict.

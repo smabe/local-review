@@ -1,0 +1,4 @@
+FILE: parser.py:34 | confidence: high
+QUOTE:     missing = [k for k in required if k in config and config[k]]
+DEFECT: The predicate is inverted relative to the function's purpose. The docstring says the function must name every required key that is *missing or empty*, but this comprehension collects keys that are *present and non-empty* (`k in config and config[k]`). The condition should be `k not in config or not config[k]`.
+FAILURE: `validate_required({}, ["port"])` collects no keys and returns without raising, even though the required key "port" is missing; conversely `validate_required({"host": "localhost"}, ["host"])` raises `ValueError: missing required config: host` for a key that is present and non-empty.

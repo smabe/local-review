@@ -1,0 +1,3 @@
+fixture=stalecomment
+truth=real
+gating=1
