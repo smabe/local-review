@@ -344,17 +344,21 @@ plus one worktree prober that built phase `snapshot` for real.
 
 ## Findings log
 
-- **2026-08-19 (snapshot).** `bash tests/test_local_review_audit.sh` **cannot run
-  under clu worker dispatch as-is.** Its `mktemp -d` at `:23` has no template, and
-  macOS `mktemp` resolves that through `_CS_DARWIN_USER_TEMP_DIR`
-  (`/var/folders/…`) while ignoring `TMPDIR` entirely — a path the worker sandbox
-  denies, so the suite dies at line 37 before a single assertion. Verified: with a
-  `PATH` shim redirecting the no-template form into `$TMPDIR` it is
-  `pass=100 fail=0 skipped=0`. The one-line fix is the idiom `scripts/review.sh:400`
-  already uses (`mktemp -d "${TMPDIR:-/tmp}/….XXXXXX"`), but that file is
-  byte-identical with the private mirror and is a **stated Non-goal** here, so no
-  phase may make it. `tests/test_bench_runners.sh` uses the TMPDIR-honouring form
-  and runs natively. Every later phase hits this at `clu verify` time.
+- **2026-08-19 (snapshot).** A clu worker **cannot run
+  `bash tests/test_local_review_audit.sh` from its own Bash tool.** That suite's
+  `mktemp -d` at `:23` has no template, and macOS resolves the no-template form
+  through `_CS_DARWIN_USER_TEMP_DIR` (`/var/folders/…`) while ignoring `TMPDIR`
+  entirely — a path the worker's tool sandbox denies, so the suite dies at line 37
+  before a single assertion. **`clu verify` is NOT affected** (measured: it
+  verified this phase's commit, running the same suite, from the same worker), so
+  the gate itself is sound and this is only about a worker's own interactive runs.
+  Workaround if you need the footer in-session: a `PATH` shim redirecting the
+  no-template `mktemp -d` into `$TMPDIR`, which yields
+  `pass=100 fail=0 skipped=0`. The one-line real fix is the idiom
+  `scripts/review.sh:400` already uses (`mktemp -d "${TMPDIR:-/tmp}/….XXXXXX"`),
+  but that suite is byte-identical with the private mirror and is a **stated
+  Non-goal** here, so no phase may make it. `tests/test_bench_runners.sh` uses the
+  TMPDIR-honouring form and runs natively either way.
 - **2026-08-19 (snapshot).** `review_sha()` is now hand-duplicated in all three
   runners, and it **drifted between the first and second review round of this very
   phase** (the `rm -f`-on-refusal cleanup landed in `run_eval.sh` and
