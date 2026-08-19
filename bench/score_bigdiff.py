@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Score one bigdiff review transcript against the fixture's six known bugs.
 
-Prints a single line: "<hits> <other> <bug-ids|->" for run_bigdiff.sh to read.
+Prints a single line: "<hits> <other> <bug-ids|->" for run_bigdiff.sh to read,
+or exits EMPTY_LOG_EXIT when the transcript is empty and there is no score.
 
 Scoring is by the QUOTE line, the same evidence the audit's own anti-fabrication
 gate uses -- a finding that does not quote the offending line is not a catch.
@@ -12,6 +13,14 @@ discovered by an arm 2026-08-19. Read logs/ before calling one a fabrication.
 """
 import re
 import sys
+
+# An empty transcript is signalled by this EXIT CODE, not by a token in the
+# output line, so run_bigdiff.sh can route it into the row's `status` column
+# instead of `bugs`. The old "0 0 EMPTY-LOG" put a marker where readers parse
+# bug ids while the two numeric columns beside it claimed a real measurement of
+# zero -- which is why watch_ctx_tiers.py renders such a row as "0 known bugs",
+# i.e. as a model result. Anything else non-zero stays SCORE-ERROR.
+EMPTY_LOG_EXIT = 3
 
 # (id, [quote substrings, any one matches], extra predicate over the block)
 #
@@ -104,8 +113,8 @@ def main():
     # read identically to a clean review, which is the one confusion this
     # fixture exists to catch -- so say so instead.
     if not text.strip():
-        print("0 0 EMPTY-LOG")
-        return
+        print("EMPTY-LOG")
+        return EMPTY_LOG_EXIT
     found, other = [], 0
     for b in blocks(text):
         q = normalize(b["quote"])
@@ -123,4 +132,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # main()'s return value is the exit status, which is how the empty-transcript
+    # case reaches run_bigdiff.sh without putting a token in a scored column.
+    # A normal score falls off the end of main(), so None -> 0 as before.
+    sys.exit(main())

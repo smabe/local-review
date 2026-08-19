@@ -799,6 +799,510 @@ else
     bad "rescore rewrote the file despite refusing on a moved column"
 fi
 
+# --- infrastructure failures are not model failures --------------------------
+
+# The whole point of the `status` column: a run that never reached the model
+# must not be recorded as a model that found nothing. The classifier is an
+# ALLOWLIST on review.sh's audit footer, and the precedence between its four
+# steps is load-bearing — see bench/README.md and docs/bench-hardening-spec.md.
+
+# sig_of <runner> <VAR> — the grep pattern a runner actually uses. Read out of
+# the runner rather than retyped here, so the drift check below and the
+# behavioural stubs are pinned to the same string the code greps for.
+sig_of() {
+    sed -n "s/^$2='\(.*\)'\$/\1/p" "$ROOT/bench/$1" | head -1
+}
+# sig_line <runner> <VAR> [tail] — the stderr line a real refusal produces,
+# built from that pattern with its `^` anchor stripped. Nothing is retyped:
+# the drift check ties each pattern back to a live literal in review.sh, so a
+# reworded refusal fails there instead of silently un-matching here.
+sig_line() {
+    _p="$(sig_of "$1" "$2")"
+    printf '%s%s\n' "${_p#^}" "${3:-}"
+}
+
+INFRA_RC=$(sed -n 's/^INFRA_EXIT=\([0-9][0-9]*\).*$/\1/p' "$ROOT/bench/run_eval.sh" | head -1)
+if [ -n "$INFRA_RC" ]; then ok; else bad "run_eval.sh does not define INFRA_EXIT"; fi
+INFRA_RC="${INFRA_RC:-75}"
+
+# A stub review.sh driven entirely by the environment: it reproduces one
+# refusal shape per run without needing a model, a server or a real diff.
+cat > "$TMP/stub-infra.sh" <<'ISTUB'
+#!/usr/bin/env bash
+if [ -n "${STUB_MARKER:-}" ]; then echo RUN >> "$STUB_MARKER"; fi
+if [ -n "${STUB_HOOK:-}" ] && [ -x "$STUB_HOOK" ]; then "$STUB_HOOK"; fi
+if [ -n "${STUB_OUT:-}" ]; then printf '%s\n' "$STUB_OUT"; fi
+if [ -n "${STUB_ERR:-}" ]; then printf '%s\n' "$STUB_ERR" >&2; fi
+if [ -n "${STUB_SLEEP:-}" ]; then sleep "$STUB_SLEEP"; fi
+exit "${STUB_RC:-0}"
+ISTUB
+
+# A well-formed audit footer, prefix taken from the runner's own allowlist
+# pattern. Its shape also has to satisfy the pre-existing nfind scrape.
+EVAL_FOOTER="$(sig_line run_eval.sh SIG_AUDIT '1/1 tool calls ok, 0 defect(s), 10 tokens peak')"
+BIG_FOOTER="$(sig_line run_bigdiff.sh SIG_AUDIT '1/1 tool calls ok, 0 defect(s), 10 tokens peak')"
+
+# --- a lock refusal is a terminal row, not an exit-1 measurement -------------
+
+WS="$TMP/infra-lock"
+relocate run_eval.sh "$WS"
+cp "$TMP/stub-infra.sh" "$WS/scripts/review.sh"
+(
+    export STUB_ERR="$(sig_line run_eval.sh SIG_LOCK '4242) holds the model')" STUB_RC=1
+    export LOCAL_REVIEW_EVAL_CASES="offbyone"
+    bash "$WS/bench/run_eval.sh" stub-provider stub-model 2 lock-label
+) > "$WS/driver.log" 2>&1
+rc=$?
+LOCK_TSV="$WS/bench/results.tsv"
+
+if [ "$rc" -eq "$INFRA_RC" ]; then ok; else bad "a lock-refused batch exited $rc, expected the infrastructure code $INFRA_RC"; fi
+if [ "$(wc -l < "$LOCK_TSV" | tr -d ' ')" = "2" ]; then
+    ok
+else
+    bad "a lock-refused batch wrote $(( $(wc -l < "$LOCK_TSV") - 1 )) rows, expected exactly one terminal row"
+fi
+if [ "$(field "$LOCK_TSV" 2 10)" = "LOCKED" ]; then ok; else bad "terminal row status is '$(field "$LOCK_TSV" 2 10)', expected LOCKED"; fi
+# summarize_ctx_tiers.py:71 int-casts `found` over every row of a label, so a
+# marker in a numeric column is a ValueError rather than a marker.
+case "$(field "$LOCK_TSV" 2 7)$(field "$LOCK_TSV" 2 8)$(field "$LOCK_TSV" 2 9)" in
+    *[!0-9]*) bad "terminal row put a non-numeric token in nfind/found/found_any: '$(field "$LOCK_TSV" 2 7)' '$(field "$LOCK_TSV" 2 8)' '$(field "$LOCK_TSV" 2 9)'" ;;
+    "")       bad "terminal row left nfind/found/found_any empty; they are int-cast by summarize_ctx_tiers.py" ;;
+    *)        ok ;;
+esac
+
+# --- the terminal row is not a dispatchable key ------------------------------
+
+# This is the assertion phase `resume` rests on: its skip predicate is plain
+# key-existence over numeric `run` values, with no status inspection at all. A
+# terminal row that occupied (label, case, run) would make an aborted batch
+# poison that key forever — the #1-vs-#2 deadlock this workstream dissolves.
+if [ "$(field "$LOCK_TSV" 2 3)" = "abort" ]; then ok; else bad "terminal row's run is '$(field "$LOCK_TSV" 2 3)', expected the reserved token 'abort'"; fi
+if [ -z "$(field "$LOCK_TSV" 2 2)" ]; then ok; else bad "terminal row's case is '$(field "$LOCK_TSV" 2 2)', expected empty"; fi
+_keys=$(awk -F'\t' 'NR>1 && $1=="lock-label" && $3 ~ /^[0-9]+$/ {print $3}' "$LOCK_TSV")
+if [ -z "$_keys" ]; then ok; else bad "a numeric-run key scan matched the terminal row: '$_keys'"; fi
+
+# --- a lock refusal aborts run_bigdiff.sh the same way ------------------------
+
+WS="$TMP/infra-lock-big"
+relocate run_bigdiff.sh "$WS"
+cp "$TMP/stub-infra.sh" "$WS/scripts/review.sh"
+(
+    export STUB_ERR="$(sig_line run_bigdiff.sh SIG_LOCK '4242) holds the model')" STUB_RC=1
+    bash "$WS/bench/run_bigdiff.sh" stub-provider stub-model 2 lock-big
+) > "$WS/driver.log" 2>&1
+rc=$?
+LOCKB_TSV="$WS/bench/results-bigdiff.tsv"
+
+if [ "$rc" -eq "$INFRA_RC" ]; then ok; else bad "a lock-refused bigdiff batch exited $rc, expected $INFRA_RC"; fi
+if [ "$(wc -l < "$LOCKB_TSV" | tr -d ' ')" = "2" ]; then ok; else bad "a lock-refused bigdiff batch did not write exactly one terminal row"; fi
+if [ "$(field "$LOCKB_TSV" 2 9)" = "LOCKED" ]; then ok; else bad "bigdiff terminal row status is '$(field "$LOCKB_TSV" 2 9)', expected LOCKED"; fi
+if [ "$(field "$LOCKB_TSV" 2 2)" = "abort" ]; then ok; else bad "bigdiff terminal row's run is '$(field "$LOCKB_TSV" 2 2)', expected 'abort'"; fi
+
+# --- server down at batch start: nothing dispatched, nothing recorded --------
+
+# Port 1 is never listening, so the probe fails without needing a torn-down
+# listener. PROBE_TRIES/PROBE_SLEEP keep the deliberate retry loop from making
+# this test wait out a real arm's patience.
+WS="$TMP/infra-down"
+relocate run_eval.sh "$WS"
+cp "$TMP/stub-infra.sh" "$WS/scripts/review.sh"
+(
+    export LOCAL_REVIEW_EVAL_CASES="offbyone"
+    export LOCAL_REVIEW_LLAMA_URL="http://127.0.0.1:1/v1/models"
+    export LOCAL_REVIEW_PROBE_TRIES=2 LOCAL_REVIEW_PROBE_SLEEP=0
+    bash "$WS/bench/run_eval.sh" llamaserver stub-model 2 down-label
+) > "$WS/driver.log" 2>&1
+rc=$?
+DOWN_TSV="$WS/bench/results.tsv"
+
+if [ "$rc" -eq "$INFRA_RC" ]; then ok; else bad "a batch against a dead server exited $rc, expected $INFRA_RC"; fi
+if [ "$(wc -l < "$DOWN_TSV" | tr -d ' ')" = "2" ]; then ok; else bad "a dead-server batch wrote more than one terminal row"; fi
+if [ "$(field "$DOWN_TSV" 2 10)" = "SERVER-DOWN" ]; then ok; else bad "terminal row status is '$(field "$DOWN_TSV" 2 10)', expected SERVER-DOWN"; fi
+# A run that never dispatched must leave no artifacts to be mistaken for one.
+if [ ! -e "$WS/bench/logs/down-label-offbyone-r1.txt" ]; then ok; else bad "a run that never dispatched still wrote a transcript"; fi
+
+# --- server dies mid-batch: run 1 survives, run 2 aborts ---------------------
+
+# The endpoint is a file:// URL the stub deletes during run 1, not a throwaway
+# HTTP listener. The probe is one `curl -sf` against $LLAMA_URL and nothing in
+# the runner inspects the scheme, so this drives the identical code path —
+# reachable, then not — while needing no bound port, which a test sandbox may
+# refuse. The HTTP form is covered by the manual confirmation in the phase's
+# acceptance, against a real llama-server.
+SRV="$TMP/infra-endpoint"
+printf '{"data":[]}\n' > "$SRV"
+if curl -sf --max-time 5 "file://$SRV" >/dev/null 2>&1; then
+    ok
+else
+    bad "the file:// stand-in endpoint is not reachable; the mid-batch test below cannot distinguish up from down"
+fi
+
+WS="$TMP/infra-mid"
+relocate run_eval.sh "$WS"
+cp "$TMP/stub-infra.sh" "$WS/scripts/review.sh"
+cat > "$WS/kill-server.sh" <<KILLHOOK
+#!/usr/bin/env bash
+rm -f "$SRV"
+exit 0
+KILLHOOK
+chmod +x "$WS/kill-server.sh"
+(
+    export LOCAL_REVIEW_EVAL_CASES="offbyone"
+    export LOCAL_REVIEW_LLAMA_URL="file://$SRV"
+    export LOCAL_REVIEW_PROBE_TRIES=2 LOCAL_REVIEW_PROBE_SLEEP=0
+    export STUB_HOOK="$WS/kill-server.sh" STUB_ERR="$EVAL_FOOTER"
+    bash "$WS/bench/run_eval.sh" llamaserver stub-model 3 mid-label
+) > "$WS/driver.log" 2>&1
+rc=$?
+MID_TSV="$WS/bench/results.tsv"
+
+if [ "$rc" -eq "$INFRA_RC" ]; then ok; else bad "a batch whose server died mid-run exited $rc, expected $INFRA_RC (see $WS/driver.log)"; fi
+# Run 1 measured something and keeps its row; runs 2 and 3 never dispatched.
+if [ "$(wc -l < "$MID_TSV" | tr -d ' ')" = "3" ]; then
+    ok
+else
+    bad "expected header + run 1 + one terminal row, got $(wc -l < "$MID_TSV") lines:
+$(cat "$MID_TSV")"
+fi
+if [ "$(field "$MID_TSV" 2 3)" = "1" ] && [ -z "$(field "$MID_TSV" 2 10)" ]; then
+    ok
+else
+    bad "run 1's row is not an intact clean measurement: run='$(field "$MID_TSV" 2 3)' status='$(field "$MID_TSV" 2 10)'"
+fi
+if [ "$(field "$MID_TSV" 3 10)" = "SERVER-DOWN" ] && [ "$(field "$MID_TSV" 3 3)" = "abort" ]; then
+    ok
+else
+    bad "the mid-batch abort did not append a SERVER-DOWN terminal row"
+fi
+
+# --- a timeout is a measurement, not infrastructure --------------------------
+
+# The assertion that pins the precedence order. The watchdog kills review.sh
+# BEFORE its audit block, so a timed-out run has no footer — and a naive
+# "footer absent means infrastructure" rule would file every slow run as one.
+# Under phase `resume` that would make timeouts retryable, silently deleting
+# the slow tail from every arm's latency distribution.
+WS="$TMP/infra-timeout"
+relocate run_eval.sh "$WS"
+cp "$TMP/stub-infra.sh" "$WS/scripts/review.sh"
+(
+    export LOCAL_REVIEW_EVAL_CASES="offbyone"
+    export LOCAL_REVIEW_EVAL_TIMEOUT=2
+    export STUB_SLEEP=30
+    bash "$WS/bench/run_eval.sh" stub-provider stub-model 1 timeout-label
+) > "$WS/driver.log" 2>&1
+rc=$?
+TO_TSV="$WS/bench/results.tsv"
+
+if [ "$rc" -eq 0 ]; then ok; else bad "a timed-out batch exited $rc, expected 0 (a timeout is a recorded result)"; fi
+if [ "$(field "$TO_TSV" 2 4)" = "124" ]; then ok; else bad "a timed-out run recorded exit=$(field "$TO_TSV" 2 4), expected 124"; fi
+if [ -z "$(field "$TO_TSV" 2 10)" ]; then
+    ok
+else
+    bad "a timed-out run recorded status='$(field "$TO_TSV" 2 10)'; rc==124 must be classified before the footer rule"
+fi
+
+# --- the footer is an allowlist ----------------------------------------------
+
+# review.sh emits its audit footer before all five audit exit paths, so footer
+# present <=> a measurement happened, whatever the exit code was. A blocklist of
+# known failure signatures would still have missed the exit-127 bash splice from
+# the same night that produced the two signatures it did know.
+WS="$TMP/infra-footer"
+relocate run_eval.sh "$WS"
+cp "$TMP/stub-infra.sh" "$WS/scripts/review.sh"
+(
+    export LOCAL_REVIEW_EVAL_CASES="offbyone"
+    export STUB_ERR="$EVAL_FOOTER" STUB_RC=4
+    bash "$WS/bench/run_eval.sh" stub-provider stub-model 1 footer-label
+) > "$WS/driver.log" 2>&1
+FOOT_TSV="$WS/bench/results.tsv"
+if [ -z "$(field "$FOOT_TSV" 2 10)" ]; then
+    ok
+else
+    bad "a non-zero exit WITH an audit footer recorded status='$(field "$FOOT_TSV" 2 10)', expected empty"
+fi
+
+# No footer, no known signature: the open bucket. OOM, a pi crash, a
+# model-unload race and a full disk all land here as a plain rc != 0, and a
+# blank status a reader trusts is worse than an explicit unknown.
+WS="$TMP/infra-suspect"
+relocate run_eval.sh "$WS"
+cp "$TMP/stub-infra.sh" "$WS/scripts/review.sh"
+(
+    export LOCAL_REVIEW_EVAL_CASES="offbyone"
+    export STUB_ERR="something nobody has a signature for" STUB_RC=137
+    bash "$WS/bench/run_eval.sh" stub-provider stub-model 1 suspect-label
+) > "$WS/driver.log" 2>&1
+rc=$?
+SUS_TSV="$WS/bench/results.tsv"
+if [ "$rc" -eq 0 ]; then ok; else bad "an unrecognised failure aborted the batch (exit $rc); only the two known signatures are terminal"; fi
+if [ "$(field "$SUS_TSV" 2 10)" = "SUSPECT" ]; then ok; else bad "an unrecognised failure recorded status='$(field "$SUS_TSV" 2 10)', expected SUSPECT"; fi
+
+# --- signature drift ---------------------------------------------------------
+
+# The runners grep for text review.sh produces. Retyping it into the runners is
+# what makes the greps rot silently the next time review.sh rewords, so assert
+# every pattern is still a real prefix of a real literal in review.sh — the same
+# extraction shape as tests/test_local_review_audit.sh:305-318.
+if [ -f "$ROOT/scripts/review.sh" ]; then
+    _pats="$TMP/sig-patterns.txt"
+    : > "$_pats"
+    for _r in run_eval.sh run_bigdiff.sh; do
+        for _v in SIG_AUDIT SIG_SERVER SIG_LOCK; do
+            printf '%s\t%s\t%s\n' "$_r" "$_v" "$(sig_of "$_r" "$_v")" >> "$_pats"
+        done
+    done
+    python3 - "$ROOT/scripts/review.sh" "$_pats" > "$TMP/sig-drift.txt" 2>&1 <<'PY'
+import sys
+
+src = open(sys.argv[1]).read()
+PREFIX = "local-review: "
+
+
+def literals(marker, stops):
+    """Every message literal opened by `marker`, cut at its first variable.
+
+    The prefix before the first substitution is the only stable part, which is
+    exactly what the runners may depend on.
+    """
+    out, i = [], 0
+    while True:
+        j = src.find(marker, i)
+        if j < 0:
+            return out
+        j += len(marker)
+        k = min([p for p in (src.find(s, j) for s in stops) if p >= 0] or [len(src)])
+        out.append(src[j:k])
+        i = k
+
+
+lits = literals('die "', ("$", '"')) + literals('warn("', ("%", '"'))
+if not lits:
+    sys.exit("extracted no die/warn literals from review.sh; the drift check "
+             "would pass vacuously")
+
+bad = 0
+for line in open(sys.argv[2]):
+    runner, var, pat = line.rstrip("\n").split("\t")
+    if not pat:
+        print(f"{runner}: {var} is not defined")
+        bad += 1
+        continue
+    if not pat.startswith("^" + PREFIX):
+        print(f"{runner}: {var} is not anchored on '^{PREFIX}': {pat!r}")
+        bad += 1
+        continue
+    body = pat[len("^" + PREFIX):]
+    if not any(l.startswith(body) for l in lits):
+        print(f"{runner}: {var} matches no live review.sh message: {body!r}")
+        bad += 1
+sys.exit(1 if bad else 0)
+PY
+    if [ $? -eq 0 ]; then ok; else bad "a runner's failure signature drifted from scripts/review.sh:
+$(cat "$TMP/sig-drift.txt")"; fi
+else
+    skip "signature drift: scripts/review.sh not in this checkout"
+fi
+
+# --- a fail-fast structurally cannot emit a partial row ----------------------
+
+# The abort path lives above the per-run append in both runners, so there is no
+# ordering in which a refused attempt writes half a measurement row.
+for _r in run_eval.sh run_bigdiff.sh; do
+    _abort_ln=$(grep -n 'exit "\$INFRA_EXIT"' "$ROOT/bench/$_r" | tail -1 | cut -d: -f1)
+    _tee_ln=$(grep -n 'tee -a "\$RESULTS"' "$ROOT/bench/$_r" | head -1 | cut -d: -f1)
+    if [ -n "$_abort_ln" ] && [ -n "$_tee_ln" ] && [ "$_abort_ln" -lt "$_tee_ln" ]; then
+        ok
+    else
+        bad "$_r: the abort path (line ${_abort_ln:-none}) does not precede the row append (line ${_tee_ln:-none})"
+    fi
+    # One append site only, or the ordering above says nothing about the others.
+    if [ "$(grep -c 'tee -a "\$RESULTS"' "$ROOT/bench/$_r")" = "1" ]; then
+        ok
+    else
+        bad "$_r has more than one measurement-row append; the ordering check above is not exhaustive"
+    fi
+done
+
+# --- run_ctx_tiers.sh's unset list is complete -------------------------------
+
+# The unset at :25-26 is how a tier arm guarantees it measured the DEFAULT
+# configuration. Derived from the two runners it actually dispatches (it never
+# dispatches run_verify.sh), so a knob added to either of them later without
+# updating the list fails here. LOCAL_REVIEW_ARM_SUITES is read by
+# run_ctx_tiers.sh itself and deliberately survives, so it cannot appear in the
+# derived set at all.
+_unset_block=$(awk '/^unset LOCAL_REVIEW/{f=1} f{print; if ($0 !~ /\\$/) exit}' "$ROOT/bench/run_ctx_tiers.sh")
+if [ -n "$_unset_block" ]; then ok; else bad "could not extract the unset list from run_ctx_tiers.sh; the completeness check would pass vacuously"; fi
+_knobs=$(grep -oh 'LOCAL_REVIEW_[A-Z_]*' "$ROOT/bench/run_eval.sh" "$ROOT/bench/run_bigdiff.sh" | sort -u)
+if [ -n "$_knobs" ]; then ok; else bad "found no LOCAL_REVIEW_* knobs in the dispatched runners; the check below is vacuous"; fi
+_missing=""
+for _k in $_knobs; do
+    case " $_unset_block " in
+        *" $_k "*|*" $_k"$'\n'*) ;;
+        *) _missing="$_missing $_k" ;;
+    esac
+done
+if [ -z "$_missing" ]; then
+    ok
+else
+    bad "run_ctx_tiers.sh's unset list is missing knobs read by the runners it dispatches:$_missing"
+fi
+
+# --- bigdiff: scoring markers ride `status`, never a measurement column ------
+
+# `bugs` is parsed as a comma-separated list of bug ids and `hits`/`other` are
+# int-cast. A marker in any of them is read as a model result: the exit-127
+# bash-splice row renders as "0 known bugs" in watch_ctx_tiers.py to this day.
+WS="$TMP/infra-scorefail"
+relocate run_bigdiff.sh "$WS"
+cp "$TMP/stub-infra.sh" "$WS/scripts/review.sh"
+rm -f "$WS/bench/score_bigdiff.py"
+printf '#!/usr/bin/env python3\nimport sys\nsys.exit(9)\n' > "$WS/bench/score_bigdiff.py"
+(
+    export STUB_ERR="$BIG_FOOTER" STUB_OUT="some verdict"
+    bash "$WS/bench/run_bigdiff.sh" stub-provider stub-model 1 scorefail-label
+) > "$WS/driver.log" 2>&1
+SF_TSV="$WS/bench/results-bigdiff.tsv"
+if [ "$(field "$SF_TSV" 2 9)" = "SCORE-ERROR" ]; then ok; else bad "a crashed scorer recorded status='$(field "$SF_TSV" 2 9)', expected SCORE-ERROR"; fi
+if [ -z "$(field "$SF_TSV" 2 6)$(field "$SF_TSV" 2 7)$(field "$SF_TSV" 2 8)" ]; then
+    ok
+else
+    bad "an unscored row still padded hits/other/bugs: '$(field "$SF_TSV" 2 6)' '$(field "$SF_TSV" 2 7)' '$(field "$SF_TSV" 2 8)'"
+fi
+
+# An empty transcript is the same class of fact and now travels the same way.
+WS="$TMP/infra-emptylog"
+relocate run_bigdiff.sh "$WS"
+cp "$TMP/stub-infra.sh" "$WS/scripts/review.sh"
+(
+    export STUB_ERR="$BIG_FOOTER"
+    bash "$WS/bench/run_bigdiff.sh" stub-provider stub-model 1 emptylog-label
+) > "$WS/driver.log" 2>&1
+EL_TSV="$WS/bench/results-bigdiff.tsv"
+if [ "$(field "$EL_TSV" 2 9)" = "EMPTY-LOG" ]; then ok; else bad "an empty transcript recorded status='$(field "$EL_TSV" 2 9)', expected EMPTY-LOG"; fi
+if [ -z "$(field "$EL_TSV" 2 8)" ]; then ok; else bad "EMPTY-LOG still rides the bugs column: '$(field "$EL_TSV" 2 8)'"; fi
+
+# --- the readers survive a status-bearing row --------------------------------
+
+# A marked row has EMPTY measurement columns, so any reader that int-casts them
+# has to consult `status` first. summarize_ctx_tiers.py must still run against
+# the real files, and watch_ctx_tiers.py must render the marker rather than
+# raising on the empty cells beside it.
+cat > "$FX/read_status.py" <<'PY'
+import sys
+
+sys.path.insert(0, sys.argv[1])
+import watch_ctx_tiers as watch
+
+base = {"exit": "4", "run": "1", "case": "offbyone", "nfind": "3",
+        "found": "1", "found_any": "1", "hits": "", "other": "", "bugs": "",
+        "status": "SCORE-ERROR"}
+_, text = watch.big_verdict(base)
+assert "SCORE-ERROR" in text, f"bigdiff verdict for a marked row is {text!r}"
+_, text = watch.small_verdict(dict(base, status="SUSPECT"))
+assert "SUSPECT" in text, f"small verdict for a marked row is {text!r}"
+# An unmarked row still reads exactly as it did before.
+_, text = watch.big_verdict(dict(base, status="", hits="2", other="1"))
+assert "2/6" in text, f"bigdiff verdict for a clean row changed: {text!r}"
+print("ok")
+PY
+if python3 "$FX/read_status.py" "$FX" > "$FX/status-out.txt" 2>&1; then
+    ok
+else
+    bad "a status-bearing row broke watch_ctx_tiers.py:
+$(cat "$FX/status-out.txt")"
+fi
+if python3 "$ROOT/bench/summarize_ctx_tiers.py" > "$TMP/summarize.txt" 2>&1; then
+    ok
+else
+    bad "summarize_ctx_tiers.py no longer runs against the real results files:
+$(tail -5 "$TMP/summarize.txt")"
+fi
+
+# A terminal row is not a measurement, so it must not reach any aggregate. Its
+# numeric cells are padded (nothing indexes it, and a bare int() sweep over a
+# label would otherwise raise), which is exactly why an aggregate that took it
+# at face value would report a 0-second run that never happened.
+SUM="$TMP/summ"; mkdir -p "$SUM/logs"
+cp "$ROOT/bench/summarize_ctx_tiers.py" "$SUM/"
+{
+    printf 'label\tcase\trun\texit\texpected\tsecs\tnfind\tfound\tfound_any\tstatus\tdate\tsha\tvsurv\tvtotal\n'
+    printf 'qwen38-nothink-ctx48k\toffbyone\t1\t4\t4\t100\t1\t1\t1\t\t2026-08-19\tabc123def456\t\t\n'
+    printf 'qwen38-nothink-ctx48k\toffbyone\t2\t4\t4\t300\t1\t1\t1\t\t2026-08-19\tabc123def456\t\t\n'
+    printf 'qwen38-nothink-ctx48k\t\tabort\t\t\t0\t0\t0\t0\tSERVER-DOWN\t2026-08-19\tabc123def456\t\t\n'
+} > "$SUM/results.tsv"
+printf 'label\trun\texit\tsecs\tnfind\thits\tother\tbugs\tstatus\tdate\tsha\tvsurv\tvtotal\n' \
+    > "$SUM/results-bigdiff.tsv"
+
+if python3 "$SUM/summarize_ctx_tiers.py" > "$SUM/out.txt" 2>&1; then ok; else bad "summarize_ctx_tiers.py raised on a results file containing a terminal row:
+$(cat "$SUM/out.txt")"; fi
+if grep -q '100-300' "$SUM/out.txt"; then
+    ok
+else
+    bad "the terminal row's padded secs reached the latency range:
+$(grep 'ctx48k' "$SUM/out.txt")"
+fi
+if grep -q '2/2' "$SUM/out.txt"; then
+    ok
+else
+    bad "the terminal row reached the detection denominator:
+$(grep 'ctx48k' "$SUM/out.txt")"
+fi
+
+# --- an infrastructure abort stops the whole arm -----------------------------
+
+# run_ctx_tiers.sh dispatches two suites in sequence. Letting the second one run
+# after the first aborted on infrastructure either appends a SECOND terminal row
+# under one label — against the documented "exactly one" — or, if the server
+# answers again inside the probe's retry window, completes the bigdiff half of
+# an arm whose eval half is truncated. The documented recovery for a 75 is to
+# re-run the identical command, which would then double-count those bigdiff rows.
+# The guard covers ANY non-zero exit, not just the infrastructure 75:
+# run_eval.sh also exits 2 from inside its run loop on a drifted fixture marker,
+# after rows exist, and that recovers even worse (its documented answer is "do
+# not resume", so a bigdiff half dispatched over it persists).
+_guard_ln=$(grep -n 'arm_rc" -ne 0' "$ROOT/bench/run_ctx_tiers.sh" | head -1 | cut -d: -f1)
+_big_ln=$(grep -n 'run_bigdiff.sh" llamaserver' "$ROOT/bench/run_ctx_tiers.sh" | head -1 | cut -d: -f1)
+if [ -n "$_guard_ln" ] && [ -n "$_big_ln" ] && [ "$_guard_ln" -lt "$_big_ln" ]; then
+    ok
+else
+    bad "run_ctx_tiers.sh dispatches its bigdiff suite (line ${_big_ln:-none}) without first checking for an infrastructure abort (line ${_guard_ln:-none})"
+fi
+
+# --- rescore retires a scoring marker it has just resolved -------------------
+
+# A SCORE-ERROR row is repaired by re-scoring it from the transcript. Leaving
+# the marker behind after that makes watch_ctx_tiers.py's status gate hide the
+# numbers the rescore just restored — the two mechanisms shipped together and
+# have to compose.
+RSST="$TMP/rescore-status"; mkdir -p "$RSST/logs"
+cp "$ROOT/bench/rescore_bigdiff.py" "$ROOT/bench/score_bigdiff.py" "$RSST/"
+printf 'nothing here resembles a finding block\n' > "$RSST/logs/sc-arm-bigdiff-r1.txt"
+printf 'nothing here resembles a finding block\n' > "$RSST/logs/su-arm-bigdiff-r1.txt"
+{
+    printf 'label\trun\texit\tsecs\tnfind\thits\tother\tbugs\tstatus\tdate\tsha\tvsurv\tvtotal\n'
+    printf 'sc-arm\t1\t4\t500\t3\t\t\t\tSCORE-ERROR\t2026-08-19\tabc123def456\t\t\n'
+    printf 'su-arm\t1\t1\t500\t0\t\t\t\tSUSPECT\t2026-08-19\tabc123def456\t\t\n'
+} > "$RSST/results-bigdiff.tsv"
+
+if python3 "$RSST/rescore_bigdiff.py" > "$RSST/out.txt" 2>&1; then ok; else bad "rescore failed on a status-bearing file:
+$(cat "$RSST/out.txt")"; fi
+if [ -z "$(field "$RSST/results-bigdiff.tsv" 2 9)" ]; then
+    ok
+else
+    bad "a successfully rescored row kept status='$(field "$RSST/results-bigdiff.tsv" 2 9)'"
+fi
+if [ "$(field "$RSST/results-bigdiff.tsv" 2 6)" = "0" ]; then ok; else bad "the rescored row did not get its hits back: '$(field "$RSST/results-bigdiff.tsv" 2 6)'"; fi
+# SUSPECT describes the RUN, not the score, so no amount of re-scoring resolves
+# it and the rescore has no business clearing it.
+if [ "$(field "$RSST/results-bigdiff.tsv" 3 9)" = "SUSPECT" ]; then
+    ok
+else
+    bad "rescore cleared SUSPECT, which is a property of the run and not of the score"
+fi
+
 # --- the harness never writes into the real bench/ ---------------------------
 
 # If a symlink ever points the wrong way, a test run appends junk rows to

@@ -88,6 +88,12 @@ def peak_wired_gb(label):
 
 def small_verdict(row):
     """What the run means, in the bench's own terms."""
+    # `status` gates every other cell in the row (bench/README.md): a non-empty
+    # value says this was not a clean measurement, so nothing below it can be
+    # read at face value. Without this a SUSPECT run renders as "MISSED" -- a
+    # model result -- which is the confusion the column was added to end.
+    if row.get("status"):
+        return RED, row["status"]
     exit_code, case = row["exit"], row["case"]
     if exit_code == "124":
         return RED, "TIMED OUT"
@@ -106,6 +112,11 @@ def small_verdict(row):
 
 
 def big_verdict(row):
+    # Same gate as small_verdict, and here it also has to precede the int()
+    # casts below: a marked row leaves hits/other honestly EMPTY rather than
+    # padding them with a zero that reads as "matched none of the six bugs".
+    if row.get("status"):
+        return RED, row["status"]
     if row["exit"] == "124":
         return RED, "TIMED OUT"
     if row["exit"] in ("1", "3"):

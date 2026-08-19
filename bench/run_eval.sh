@@ -32,6 +32,110 @@ PROVIDER="$1"; MODEL="$2"; RUNS="${3:-1}"; LABEL="${4:?label required}"
 # survive the split; run review.sh by hand for that.
 CASES="${LOCAL_REVIEW_EVAL_CASES:-offbyone swallow boolean leak clean}"
 EXTRA_ARGS="${LOCAL_REVIEW_EVAL_ARGS:-}"
+
+# --- infrastructure failures are not model failures --------------------------
+#
+# The patterns the classifier below greps for, each ANCHORED on the
+# `local-review: ` prefix review.sh's die/note helpers add (scripts/review.sh:44-45).
+# The anchor is not decoration: verdict reasons reach stderr under --json, which
+# is a single-word flag EXTRA_ARGS accepts, and a reviewed diff can contain any
+# of these phrases literally.
+#
+# SIG_AUDIT is an ALLOWLIST, not a blocklist. review.sh emits its audit footer
+# before all five of its audit exit paths (scripts/review.sh:556-557), so
+# footer present <=> a measurement happened, whatever the exit code was. A
+# blocklist of known failure signatures is strictly weaker: the two below were
+# collected on one night that ALSO produced an exit-127 bash splice, which
+# matches neither.
+#
+# Never retype these from memory -- tests/test_bench_runners.sh asserts each is
+# still a live prefix of a real review.sh message, so a reword fails there
+# instead of silently matching nothing forever after.
+SIG_AUDIT='^local-review: audit: '
+SIG_SERVER='^local-review: no server answering at '
+SIG_LOCK='^local-review: another local review (pid '
+# The batch refused for an infrastructure reason: nothing was measured and
+# nothing was recorded, so re-running the identical command is the fix. 75 is
+# EX_TEMPFAIL from sysexits.h, and it is deliberately NOT the existing exit 2,
+# which means the opposite -- "the fixture is invalid, do not resume".
+INFRA_EXIT=75
+# Same default and same override as scripts/review.sh:38, because it is the
+# same probe against the same endpoint.
+LLAMA_URL="${LOCAL_REVIEW_LLAMA_URL:-http://localhost:8080/v1/models}"
+PROBE_TRIES="${LOCAL_REVIEW_PROBE_TRIES:-5}"
+PROBE_SLEEP="${LOCAL_REVIEW_PROBE_SLEEP:-15}"
+
+# classify_run RC ERRLOG -- print the row's `status`. THE ORDER IS LOAD-BEARING.
+classify_run() {
+  # 1. A timeout is a real observation and the exit column already records it.
+  #    FIRST, because the watchdog kills review.sh BEFORE its audit block runs:
+  #    a timed-out run has no footer, so a naive footer-absent rule files every
+  #    slow run as infrastructure -- which under phase `resume` would make
+  #    timeouts retryable and silently delete the slow tail of every arm.
+  if [ "$1" -eq 124 ]; then return 0; fi
+  # 2. Footer present, so a measurement happened. Exit code irrelevant.
+  if grep -q "$SIG_AUDIT" "$2" 2>/dev/null; then return 0; fi
+  # 3. review.sh refused before it ever reached the model. Terminal (below).
+  if grep -q "$SIG_SERVER" "$2" 2>/dev/null; then printf 'SERVER-DOWN'; return 0; fi
+  if grep -q "$SIG_LOCK" "$2" 2>/dev/null; then printf 'LOCKED'; return 0; fi
+  # 4. The open bucket, and it is not optional: OOM, a pi crash, a model-unload
+  #    race and a full disk all arrive here indistinguishable from each other.
+  #    A blank status a reader TRUSTS is worse than an explicit unknown, so this
+  #    fires on a clean exit with no footer too -- review.sh cannot produce one.
+  printf 'SUSPECT'
+}
+
+# abort_infra STATUS RC -- one terminal row, then stop the batch.
+#
+# ONE row: zero would make a truncated arm indistinguishable from a
+# deliberately short one, and one row per remaining run is the 14-junk-rows
+# incident this phase exists to prevent.
+#
+# The row is not a measurement and MUST NOT occupy a dispatchable key. `run`
+# carries the reserved non-numeric token `abort` and `case` is empty, so the
+# key-existence scan phase `resume` performs -- numeric `run` values only --
+# can never match it. That is what stops an aborted batch from poisoning the
+# key it failed on forever.
+#
+# The numeric columns are padded with 0 rather than left empty because
+# summarize_ctx_tiers.py int-casts `secs` and `found` across every row of a
+# label; a marked MEASUREMENT row leaves them empty instead, but no reader
+# indexes this one, so padding costs nothing and keeps a naive sweep alive.
+abort_infra() {
+  echo "run_eval.sh: $1 -- infrastructure failure, nothing recorded for this attempt." >&2
+  echo "run_eval.sh: fix the cause, then re-run the identical command (exit $INFRA_EXIT)." >&2
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$LABEL" "" "abort" "$2" "" "0" "0" "0" "0" \
+    "$1" "$(date +%F)" "$REVIEW_SHA" "" "" >> "$RESULTS"
+  exit "$INFRA_EXIT"
+}
+
+# probe_server -- is anything answering, checked BETWEEN runs.
+#
+# It proves a port answers and NOTHING more: not that the labelled model is the
+# one loaded, not that a generation will succeed. The footer allowlist above
+# still has to fail closed exactly as if this did not exist.
+#
+# Retried rather than single-shot: a loaded machine mid-prefill does not answer
+# promptly, and killing a healthy 40-minute arm on one false negative is
+# self-inflicted evidence loss. run_ctx_tiers.sh:130-139 retries for twenty
+# minutes for the same reason, against a server that is still loading.
+probe_server() {
+  # Only llamaserver serves this endpoint. lmstudio's own reachability check
+  # lives in review.sh and reports back through the classifier above.
+  if [ "$PROVIDER" != "llamaserver" ]; then return 0; fi
+  # A missing curl is review.sh's story to tell (scripts/review.sh:163); an
+  # infrastructure abort here would bury its far more specific message.
+  if ! command -v curl >/dev/null 2>&1; then return 0; fi
+  _try=1
+  while :; do
+    if curl -sf --max-time 10 "$LLAMA_URL" >/dev/null 2>&1; then return 0; fi
+    if [ "$_try" -ge "$PROBE_TRIES" ]; then return 1; fi
+    _try=$((_try + 1))
+    echo "run_eval.sh: nothing answering at $LLAMA_URL, retry $_try/$PROBE_TRIES" >&2
+    sleep "$PROBE_SLEEP"
+  done
+}
 # Fail closed on a bad case name. Without this, a typo'd case leaves the
 # eval repo unpatched and the run reviews a clean tree: exit 0, recorded as
 # a miss that no log distinguishes from a real one.
@@ -110,6 +214,11 @@ fi
 
 for run in $(seq 1 "$RUNS"); do
   for c in $CASES; do
+    # Before the patch is applied, before a log exists, before anything is
+    # dispatched: an attempt refused here must leave no artifact that could be
+    # mistaken for a run, and no per-run row at all.
+    probe_server || abort_infra SERVER-DOWN ""
+
     expected_exit=""; marker=""
     while IFS='=' read -r k v; do
       case "$k" in
@@ -162,6 +271,13 @@ for run in $(seq 1 "$RUNS"); do
     secs=$(( $(date +%s) - t0 ))
     if [ -f "$log.timeout" ]; then rc=124; rm -f "$log.timeout"; fi
 
+    # Classified as early as the rc allows, so a refusal aborts before any of
+    # the scraping below can dress it up as a measurement.
+    status=$(classify_run "$rc" "$log.err")
+    case "$status" in
+      SERVER-DOWN|LOCKED) abort_infra "$status" "$rc" ;;
+    esac
+
     nfind=$(sed -n 's/.*audit: .*ok, \([0-9][0-9]*\) defect(s).*/\1/p' "$log.err" | tail -1)
     [ -n "$nfind" ] || nfind=0
     found=0; found_any=0
@@ -183,9 +299,6 @@ for run in $(seq 1 "$RUNS"); do
     vpair=$(sed -n 's|.*verify: \([0-9][0-9]*\)/\([0-9][0-9]*\) finding(s) survived.*|\1 \2|p' "$log.err" | tail -1)
     if [ -n "$vpair" ]; then vsurv="${vpair% *}"; vtotal="${vpair#* }"; fi
 
-    # Empty until the classifier lands (phase infra-status): a run that reached
-    # the model and produced a verdict is a clean measurement by definition.
-    status=""
     # Per row, never hoisted: a batch that starts at 23:50 and runs four hours
     # would otherwise stamp every row with the day it began.
     rowdate=$(date +%F)

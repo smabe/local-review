@@ -44,6 +44,20 @@ def read_tsv(path):
     return rows
 
 
+def measurements(rows, label):
+    """One label's rows, minus the terminal rows that are not measurements.
+
+    A batch that aborts on infrastructure appends a single row carrying the
+    reserved non-numeric token `abort` in `run`, so it is not a dispatchable
+    key. Its numeric cells are padded with zeros -- nothing indexes it, and a
+    bare int() sweep over a label would otherwise raise -- which is exactly why
+    an aggregate that took it at face value would report a run of 0 seconds
+    that never happened. Filtering on the token, not on `status`: rows that
+    ARE measurements keep their status for the readers to weigh.
+    """
+    return [r for r in rows if r["label"] == label and r["run"].isdigit()]
+
+
 def peak_wired_gb(label):
     f = BENCH / "logs" / f"{label}-wired.txt"
     if not f.exists():
@@ -63,7 +77,7 @@ def main():
     print("== small cases: detection (catch = planted line quoted AND exit 4) ==")
     print(f"{'arm':24} {'ctx':>6} {'catches':>9} {'clean-diff':>12} {'median s':>9} {'range s':>12}")
     for label, ctx in ARMS:
-        rows = [r for r in small if r["label"] == label]
+        rows = measurements(small, label)
         if not rows:
             print(f"{label:24} {ctx:>6} {'(no data)':>9}")
             continue
@@ -94,7 +108,7 @@ def main():
     print("== small cases: untrusted verdicts and timeouts (exit 3 / 124 / 1) ==")
     any_bad = False
     for label, _ in ARMS:
-        for r in [x for x in small if x["label"] == label]:
+        for r in measurements(small, label):
             if r["exit"] in ("1", "3", "124"):
                 any_bad = True
                 print(f"  {label} {r['case']} run {r['run']}: exit {r['exit']} after {r['secs']}s")
@@ -105,7 +119,7 @@ def main():
     print("== bigdiff (18.3 KB, 6 known bugs since 2026-08-19) ==")
     print(f"{'arm':24} {'run':>4} {'exit':>5} {'secs':>6} {'nfind':>6} {'hits':>5} {'other':>6}  bugs")
     for label, _ in ARMS:
-        for r in [x for x in big if x["label"] == label]:
+        for r in measurements(big, label):
             print(f"{label:24} {r['run']:>4} {r['exit']:>5} {r['secs']:>6} "
                   f"{r['nfind']:>6} {r['hits']:>5} {r['other']:>6}  {r['bugs']}")
 

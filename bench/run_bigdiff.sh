@@ -31,6 +31,65 @@ RESULTS="$EVAL_DIR/results-bigdiff.tsv"
 TIMEOUT="${LOCAL_REVIEW_BIGDIFF_TIMEOUT:-2400}"
 PROVIDER="$1"; MODEL="$2"; RUNS="${3:-1}"; LABEL="${4:?label required}"
 
+# --- infrastructure failures are not model failures --------------------------
+# Identical in shape and reasoning to run_eval.sh, which carries the full
+# commentary: an ALLOWLIST on review.sh's audit footer decides whether a run was
+# a measurement at all, the two refusal signatures are anchored on the
+# `local-review: ` prefix its die helper adds, and none of the three is ever
+# retyped from memory -- tests/test_bench_runners.sh ties each back to a live
+# message in scripts/review.sh.
+SIG_AUDIT='^local-review: audit: '
+SIG_SERVER='^local-review: no server answering at '
+SIG_LOCK='^local-review: another local review (pid '
+# EX_TEMPFAIL: nothing was measured and nothing recorded, so re-running the
+# identical command is the fix. Deliberately not the existing exit 2, which
+# means "the fixture is invalid, do not resume".
+INFRA_EXIT=75
+LLAMA_URL="${LOCAL_REVIEW_LLAMA_URL:-http://localhost:8080/v1/models}"
+PROBE_TRIES="${LOCAL_REVIEW_PROBE_TRIES:-5}"
+PROBE_SLEEP="${LOCAL_REVIEW_PROBE_SLEEP:-15}"
+
+# classify_run RC ERRLOG -- the row's `status`. THE ORDER IS LOAD-BEARING; see
+# run_eval.sh for what each step costs to get wrong.
+classify_run() {
+  # A timeout is a real observation, and the watchdog kills review.sh before its
+  # audit block -- so this MUST precede the footer rule.
+  if [ "$1" -eq 124 ]; then return 0; fi
+  if grep -q "$SIG_AUDIT" "$2" 2>/dev/null; then return 0; fi
+  if grep -q "$SIG_SERVER" "$2" 2>/dev/null; then printf 'SERVER-DOWN'; return 0; fi
+  if grep -q "$SIG_LOCK" "$2" 2>/dev/null; then printf 'LOCKED'; return 0; fi
+  printf 'SUSPECT'
+}
+
+# abort_infra STATUS RC -- one terminal row, then stop the batch. `run` is the
+# reserved non-numeric token `abort` so the row can never occupy a dispatchable
+# key; the numeric columns are padded because no reader indexes this row, while
+# a marked MEASUREMENT row leaves them honestly empty.
+abort_infra() {
+  echo "run_bigdiff.sh: $1 -- infrastructure failure, nothing recorded for this attempt." >&2
+  echo "run_bigdiff.sh: fix the cause, then re-run the identical command (exit $INFRA_EXIT)." >&2
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$LABEL" "abort" "$2" "0" "0" "0" "0" "" \
+    "$1" "$(date +%F)" "$REVIEW_SHA" "" "" >> "$RESULTS"
+  exit "$INFRA_EXIT"
+}
+
+# probe_server -- proves a port answers and nothing more. Retried, never
+# single-shot: a loaded machine mid-prefill does not answer promptly, and a
+# bigdiff run is the longest thing in the bench to lose to a false negative.
+probe_server() {
+  if [ "$PROVIDER" != "llamaserver" ]; then return 0; fi
+  if ! command -v curl >/dev/null 2>&1; then return 0; fi
+  _try=1
+  while :; do
+    if curl -sf --max-time 10 "$LLAMA_URL" >/dev/null 2>&1; then return 0; fi
+    if [ "$_try" -ge "$PROBE_TRIES" ]; then return 1; fi
+    _try=$((_try + 1))
+    echo "run_bigdiff.sh: nothing answering at $LLAMA_URL, retry $_try/$PROBE_TRIES" >&2
+    sleep "$PROBE_SLEEP"
+  done
+}
+
 mkdir -p "$EVAL_DIR/logs"
 
 # Snapshot the reviewed script, identical in shape to run_eval.sh (which carries
@@ -89,6 +148,10 @@ fi
 [ -f "$RESULTS" ] || printf 'label\trun\texit\tsecs\tnfind\thits\tother\tbugs\tstatus\tdate\tsha\tvsurv\tvtotal\n' > "$RESULTS"
 
 for run in $(seq 1 "$RUNS"); do
+  # Before the fixture is reset, before a log exists, before anything is
+  # dispatched: a refused attempt leaves no artifact and no per-run row.
+  probe_server || abort_infra SERVER-DOWN ""
+
   # reset --hard, not checkout: the previous run's `git add -N` leaves the two
   # new files as index entries, which `clean` will not remove and `git apply`
   # then refuses to overwrite.
@@ -140,19 +203,42 @@ for run in $(seq 1 "$RUNS"); do
   secs=$(( $(date +%s) - t0 ))
   if [ -f "$log.timeout" ]; then rc=124; rm -f "$log.timeout"; fi
 
+  # Classified before anything is scraped or scored, so a refusal aborts before
+  # the columns below can dress it up as a measurement.
+  status=$(classify_run "$rc" "$log.err")
+  case "$status" in
+    SERVER-DOWN|LOCKED) abort_infra "$status" "$rc" ;;
+  esac
+
   nfind=$(sed -n 's/.*audit: .*ok, \([0-9][0-9]*\) defect(s).*/\1/p' "$log.err" | tail -1)
   [ -n "$nfind" ] || nfind=0
 
-  # A scorer crash must not append a blank-columned row that downstream awk
-  # reads as a total miss; mark it so the row is visibly unscored instead.
-  score=$(python3 "$EVAL_DIR/score_bigdiff.py" "$log") || score=""
-  if [ -n "$score" ]; then
+  # The scorer's markers describe the SCORING; the classifier above described
+  # the RUN. So they only fill a status it left empty -- and never on a timeout,
+  # whose partial transcript is already fully explained by exit=124. Overwriting
+  # that would move every timeout out of the detection denominator, which is the
+  # opposite of what a timeout means.
+  #
+  # hits/other/bugs stay EMPTY on a marked row rather than the old
+  # `0 0 SCORE-ERROR` padding: a zero in `hits` is indistinguishable from a
+  # review that genuinely matched none of the six known bugs, and `bugs` is
+  # parsed as a list of bug ids. watch_ctx_tiers.py renders the exit-127
+  # bash-splice row as "0 known bugs" to this day for exactly that reason.
+  hits=""; other=""; bugs=""
+  score=$(python3 "$EVAL_DIR/score_bigdiff.py" "$log"); srr=$?
+  if [ "$srr" -eq 0 ] && [ -n "$score" ]; then
     read -r hits other bugs <<EOF
 $score
 EOF
+  elif [ "$srr" -eq 3 ]; then
+    # score_bigdiff.py's EMPTY_LOG_EXIT: a transcript with nothing in it. Its own
+    # exit code rather than a token in stdout, so the marker cannot land in a
+    # measurement column on the way past.
+    if [ -z "$status" ] && [ "$rc" -ne 124 ]; then status="EMPTY-LOG"; fi
+    echo "run_bigdiff.sh: empty transcript for $log -- row marked EMPTY-LOG" >&2
   else
-    hits=0; other=0; bugs="SCORE-ERROR"
-    echo "run_bigdiff.sh: score_bigdiff.py failed for $log -- row marked SCORE-ERROR" >&2
+    if [ -z "$status" ] && [ "$rc" -ne 124 ]; then status="SCORE-ERROR"; fi
+    echo "run_bigdiff.sh: score_bigdiff.py failed for $log (rc $srr) -- row marked SCORE-ERROR" >&2
   fi
 
   # Both counts or neither, scraped with the same leading-.* idiom as nfind
@@ -163,9 +249,6 @@ EOF
   vpair=$(sed -n 's|.*verify: \([0-9][0-9]*\)/\([0-9][0-9]*\) finding(s) survived.*|\1 \2|p' "$log.err" | tail -1)
   if [ -n "$vpair" ]; then vsurv="${vpair% *}"; vtotal="${vpair#* }"; fi
 
-  # Empty until the classifier lands (phase infra-status). SCORE-ERROR still
-  # rides the bugs column for now; that migration belongs to the same phase.
-  status=""
   # Per row, never hoisted out of the loop -- a bigdiff batch runs for hours.
   rowdate=$(date +%F)
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \

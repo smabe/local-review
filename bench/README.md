@@ -168,8 +168,31 @@ all three files. **Read `status` first**: it gates whether anything else in the
 row means what it says.
 
 - **status** — empty on a normal run. Non-empty means the row is not a clean
-  measurement, and the value names the cause. Empty on every row today; the
-  classifier that fills it is the next change in this workstream.
+  measurement, and the value names the cause. The vocabulary is closed except
+  for `SUSPECT`, which is deliberately open:
+
+  | value | meaning | row written |
+  |---|---|---|
+  | *(empty)* | a clean measurement — every other cell means what it says | per run |
+  | `SERVER-DOWN` | nothing answered the reachability probe | **one terminal row, batch aborts** |
+  | `LOCKED` | another local review holds the model | **one terminal row, batch aborts** |
+  | `EMPTY-LOG` | the run finished but its transcript is empty | per run |
+  | `SCORE-ERROR` | the transcript exists and `score_bigdiff.py` crashed on it | per run |
+  | `SUSPECT` | non-zero exit, no audit footer, no known signature | per run |
+
+  A marked row leaves its measurement columns **empty** rather than zero:
+  `hits=0` is indistinguishable from a review that matched none of the six
+  known bugs, and `bugs` is parsed as a list of bug ids. Historical rows carry
+  `EMPTY-LOG` / `SCORE-ERROR` in `bugs` instead, from before this column
+  existed — see the cross-era note below.
+
+  The classifier is an **allowlist**, not a list of known failures: `review.sh`
+  prints its audit footer before all five of its audit exit paths, so a footer
+  in the run's `.err` means a measurement happened whatever the exit code was,
+  and everything else is guilty until proven otherwise. Its precedence order is
+  load-bearing — a timeout is checked *first*, because the watchdog kills
+  `review.sh` before its audit block runs and so a timed-out run has no footer.
+  Filing timeouts as infrastructure would delete the slow tail of every arm.
 - **date** — `date +%F`, stamped when the row is appended rather than when the
   batch started, so an arm running through midnight reports each run under the
   day it actually finished.
@@ -199,6 +222,49 @@ equality, and the readers here default the new names to the empty string while
 keeping every older name a strict lookup, so a real schema error still fails
 loudly. New columns append at the **END** only: `rescore_bigdiff.py` maps header
 names to positions and refuses to run if a pre-existing one has moved.
+
+The same boundary applies to the two markers that predate `status`: rows written
+before 2026-08-19 carry `EMPTY-LOG` and `SCORE-ERROR` in the big-diff `bugs`
+column, with `hits` and `other` padded to zero beside them. Rows written after
+it carry the marker in `status` and leave all three of those columns empty.
+Neither era was rewritten, so reading `bugs` for a marker is correct for old
+rows and reading `status` is correct for new ones.
+
+## What a runner's own exit code means
+
+Distinct from the `exit` column, which is `review.sh`'s.
+
+| code | meaning | what to do |
+|---|---|---|
+| `0` | the batch ran to the end | read the rows |
+| `2` | refused before dispatch — unknown case name, drifted fixture marker, unappliable patch, no working checksum tool | **do not resume**; the fixture or the environment is invalid and re-running changes nothing |
+| `75` | infrastructure — the server stopped answering, or another review holds the model. Exactly one terminal row was appended and nothing else was recorded | fix the cause and **re-run the identical command** |
+
+`75` is `EX_TEMPFAIL` from `sysexits.h`, chosen so that "retryable" and "do not
+retry" can never be confused for one another. `run_ctx_tiers.sh` stops the whole
+arm on one: the server a `75` reports is the one it serves itself, so running
+the second suite into it would either add a second terminal row under one label
+or half-complete an arm whose recovery is to re-run the identical command.
+
+`rescore_bigdiff.py` clears `EMPTY-LOG` and `SCORE-ERROR` from a row it
+successfully re-scores — those describe the scoring, and re-scoring is what
+resolves them. It never clears `SUSPECT`, `SERVER-DOWN` or `LOCKED`, which
+describe the run.
+
+The terminal row a `75` leaves behind carries the cause in `status`, the
+reserved token `abort` in `run`, and an empty `case` / `item`. That shape is
+deliberate: it is not a dispatchable key, so a batch that aborts on one case
+does not permanently occupy it, and a resume that skips keys already recorded
+never mistakes an abort for a completed run.
+
+**The probe proves that a port answers, and nothing more.** It does not prove
+the labelled model is the one loaded, that the served context is the one the
+label claims, or that a generation will succeed. Nothing downstream may treat a
+successful probe as safety — the footer allowlist above still fails closed
+exactly as if the probe did not exist. It also retries rather than deciding on
+one attempt, because a loaded machine mid-prefill does not answer promptly and
+killing a healthy 40-minute arm on a false negative loses more evidence than
+the probe protects.
 
 Verdict transcripts in `logs/` are the durable evidence; the TSVs are a derived
 cache. `rescore_bigdiff.py` rebuilds them, which is what makes a mid-run scoring
@@ -231,7 +297,10 @@ fabrication. `score_bigdiff.py` takes a list of anchors per bug for this reason.
 **An empty transcript is not a clean review.** `review.sh` writes its verdict at
 the end, so an in-flight or crashed run has an empty log. Scoring that as zero
 findings makes it read identically to a clean review, which is the one confusion
-this fixture exists to catch. `score_bigdiff.py` reports `EMPTY-LOG` instead.
+this fixture exists to catch. `score_bigdiff.py` says so through its exit code
+rather than its output line, so the runner records `EMPTY-LOG` in `status` and
+leaves `hits` / `other` / `bugs` empty — the marker used to ride the `bugs`
+column beside a `hits=0` that read as a real measurement of zero.
 
 **A port answering is not your server answering.** llama-server exits
 immediately when the port is already bound, so a foreign server — the operator's

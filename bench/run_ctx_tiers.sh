@@ -23,7 +23,8 @@ LABEL="${3:?label required}"
 # (LOCAL_REVIEW_ARM_SUITES deliberately survives: it is read by THIS script,
 # visible in its output, and exists for resuming a half-completed arm.)
 unset LOCAL_REVIEW_EVAL_CASES LOCAL_REVIEW_EVAL_ARGS \
-      LOCAL_REVIEW_SH LOCAL_REVIEW_EVAL_TIMEOUT LOCAL_REVIEW_BIGDIFF_TIMEOUT
+      LOCAL_REVIEW_SH LOCAL_REVIEW_EVAL_TIMEOUT LOCAL_REVIEW_BIGDIFF_TIMEOUT \
+      LOCAL_REVIEW_LLAMA_URL LOCAL_REVIEW_PROBE_TRIES LOCAL_REVIEW_PROBE_SLEEP
 
 EVAL_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$EVAL_DIR/.." && pwd)"
@@ -209,7 +210,21 @@ case " $SUITES " in *" eval "*)
   bash "$EVAL_DIR/run_eval.sh"    llamaserver "$MODEL_ID" "$RUNS" "$LABEL" || arm_rc=$? ;;
 esac
 case " $SUITES " in *" bigdiff "*)
-  bash "$EVAL_DIR/run_bigdiff.sh" llamaserver "$MODEL_ID" "$RUNS" "$LABEL" || arm_rc=$? ;;
+  # A failed first suite stops the arm. Any non-zero exit, not just the
+  # infrastructure 75: run_eval.sh also exits 2 from INSIDE its run loop on a
+  # drifted fixture marker, after rows are already on disk. Either way,
+  # dispatching the second suite produces a complete bigdiff half over a
+  # truncated eval half under ONE label -- and neither exit's documented
+  # recovery can undo that (75 says re-run the identical command, which would
+  # double-count the bigdiff rows; 2 says do not resume, so they persist).
+  # Recovering the missing half deliberately is what LOCAL_REVIEW_ARM_SUITES is
+  # for.
+  if [ "$arm_rc" -ne 0 ]; then
+    echo "=== arm $LABEL: skipping the bigdiff suite, the eval suite exited $arm_rc ===" >&2
+    echo "=== arm $LABEL: (fix the cause, then LOCAL_REVIEW_ARM_SUITES=... to finish this arm) ===" >&2
+  else
+    bash "$EVAL_DIR/run_bigdiff.sh" llamaserver "$MODEL_ID" "$RUNS" "$LABEL" || arm_rc=$?
+  fi ;;
 esac
 
 peak=$(awk -F'\t' 'NF==2 && $2+0 > m {m = $2+0} END {printf "%.1f", m/1073741824}' "$MEMLOG")

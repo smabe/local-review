@@ -39,6 +39,11 @@ HISTORICAL_INDEX = {
 # ever written carried all eight of these.
 NARROWEST = len(HISTORICAL_INDEX)
 
+# The `status` values that describe the SCORING rather than the run, and so are
+# retired by a successful rescore. Everything else in that column (SUSPECT, and
+# the terminal SERVER-DOWN / LOCKED) is a fact about the run itself.
+SCORING_MARKERS = ("SCORE-ERROR", "EMPTY-LOG")
+
 
 def cell(cols, idx, name):
     """One field, empty when the row predates the column.
@@ -137,12 +142,30 @@ def main():
         before = (cell(cols, idx, "hits"), cell(cols, idx, "other"),
                   cell(cols, idx, "bugs"))
         after = (hits, other, bugs)
+        # A scoring marker describes the SCORE, and this row has just been
+        # scored, so the marker is spent -- leaving it would make
+        # watch_ctx_tiers.py's status gate hide the very numbers restored
+        # below. SUSPECT and the two terminal markers describe the RUN, which
+        # no amount of re-scoring resolves, so they are not the scorer's to
+        # clear. Guarded on the cell existing at all: a pre-migration row is
+        # narrower than the header and has no status column to touch.
+        si = idx.get("status")
+        retire = (si is not None and si < len(cols)
+                  and cols[si] in SCORING_MARKERS)
         if before != after:
             changed += 1
             print(f"  {label} run {run}: "
                   f"hits {before[0]}->{after[0]}, other {before[1]}->{after[1]}")
             print(f"    bugs {before[2]}")
             print(f"      -> {after[2]}")
+        if retire:
+            # Counted too, or --check would report "0 rows would change" for a
+            # run that is about to rewrite the file.
+            if before == after:
+                changed += 1
+            print(f"  {label} run {run}: status {cols[si]} resolved by this "
+                  f"rescore, cleared")
+            cols[si] = ""
         cols[idx["hits"]], cols[idx["other"]], cols[idx["bugs"]] = after
         out.append("\t".join(cols))
 
@@ -159,6 +182,11 @@ def main():
     try:
         with os.fdopen(fd, "w") as fh:
             fh.write("\n".join(out) + "\n")
+            # os.replace covers a crash mid-write; only fsync covers a power
+            # loss, which can otherwise make the RENAME durable while the bytes
+            # behind it are not -- leaving the evidence short or empty.
+            fh.flush()
+            os.fsync(fh.fileno())
         # mkstemp creates owner-only, and os.replace carries the temp file's
         # mode onto the destination -- so without this the committed evidence
         # silently goes 0644 -> 0600 on every rescore. Git tracks only the exec

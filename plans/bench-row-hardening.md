@@ -424,6 +424,51 @@ plus one worktree prober that built phase `snapshot` for real.
   the `/` in `N/M`. Verified end to end against the real `review.sh` under a
   stubbed `pi`, not against a hand-typed fixture, which is the only way the
   anchoring bug shows up.
+- **2026-08-19 (infra-status).** The infrastructure exit is **75** (`EX_TEMPFAIL`,
+  "re-run the identical command"), deliberately far from the 0–4 range
+  `review.sh` uses so a runner's exit can never be misread as a review's.
+  `run_ctx_tiers.sh` now stops the arm when its FIRST suite exits non-zero at all,
+  not just on 75 — `run_eval.sh` also exits 2 from *inside* its run loop on a
+  drifted fixture marker, after rows are on disk, and a bigdiff half dispatched
+  over that truncated eval half is unrecoverable either way (75 says re-run,
+  which double-counts; 2 says do not resume, so it persists).
+- **2026-08-19 (infra-status).** **Phase 6's detection filter has a home now:**
+  `summarize_ctx_tiers.py`'s new `measurements()` helper, which every per-label
+  row selection already goes through. It filters ONLY the non-dispatchable
+  `run=abort` rows — the status gate over real measurement rows is untouched and
+  is still phase 6's, including the documented asymmetry that exit 3 and 124 stay
+  counted as detection misses. Put the filter inside that one function rather
+  than at the three call sites.
+- **2026-08-19 (infra-status).** `rescore_bigdiff.py` now RETIRES `SCORE-ERROR`
+  and `EMPTY-LOG` from any row it successfully re-scores, and never touches
+  `SUSPECT` / `SERVER-DOWN` / `LOCKED`. The distinction is the rule for anything
+  else that writes `status`: a marker describing the SCORING is resolved by
+  re-scoring, one describing the RUN is not. Any new marker needs classifying
+  into `SCORING_MARKERS` or deliberately out of it.
+- **2026-08-19 (infra-status).** The duplication the snapshot and schema phases
+  filed has grown: on top of `review_sha()` in four files, `classify_run()`,
+  `abort_infra()`, `probe_server()` and the three `SIG_*` patterns are now
+  hand-copied across `run_eval.sh` and `run_bigdiff.sh`. It was NOT extracted
+  here — a sourced `bench/` helper changes the relocation contract in
+  `tests/test_bench_runners.sh` that phases 4–6 build their own tests on, and it
+  is in no phase's Files touched. What holds it together in the meantime is the
+  drift test, which ties every `SIG_*` back to a live `die`/`warn` literal in
+  `review.sh` and fails on a reword (verified by mutation, not by inspection).
+  **Phase 5 is the last phase that opens all three runners** — if it lands
+  without the extraction, file it as its own change.
+- **2026-08-19 (infra-status).** The probe is exercised through a `file://`
+  endpoint the test deletes mid-batch, not a bound port: a worker sandbox refuses
+  `bind()`, and nothing in the runner inspects the URL scheme, so `curl -sf
+  "$LLAMA_URL"` takes the identical path. What that does NOT cover is a server
+  that accepts the connection and answers slowly or with a 5xx — the retry loop's
+  real reason for existing. **One manual confirmation against a live
+  `llama-server` is still owed** and is the only way to close it.
+- **2026-08-19 (infra-status).** For phase 4: none of the three `SIG_*` patterns
+  transfer to `run_verify.sh`. It never invokes `review.sh`, so there is no audit
+  footer to allowlist and neither refusal signature can appear — its failures come
+  out of `pi` directly. What DOES transfer verbatim is the row shape: `run=abort`
+  with an empty `item`, one terminal row, exit 75, and the numeric columns padded
+  because no reader indexes that row.
 - **2026-08-19 (schema).** A batch that cannot checksum its script exits **2**,
   reusing the existing "refused before dispatch, nothing recorded" code rather
   than inventing one. Phase 3 introduces a distinct infrastructure exit code and
