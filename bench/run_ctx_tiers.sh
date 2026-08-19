@@ -35,6 +35,25 @@ SERVERLOG="$EVAL_DIR/logs/$LABEL-server.txt"
 
 mkdir -p "$EVAL_DIR/logs"
 
+review_sha() {
+  # shasum is perl (macOS yes, minimal Linux no); sha256sum is coreutils (the
+  # reverse). Try both, take the first that yields a hash. See run_eval.sh.
+  if [ ! -r "$1" ]; then
+    echo "run_ctx_tiers.sh: cannot read $1 -- no script to review" >&2
+    return 1
+  fi
+  _sha=$(shasum -a 256 "$1" 2>/dev/null | awk '{print $1}')
+  if [ -z "$_sha" ]; then _sha=$(sha256sum "$1" 2>/dev/null | awk '{print $1}'); fi
+  if [ -z "$_sha" ]; then
+    echo "run_ctx_tiers.sh: no working shasum or sha256sum -- refusing an arm whose script version cannot be recorded" >&2
+    return 1
+  fi
+  printf '%s' "${_sha:0:12}"
+}
+# The arm's snapshot, keyed on the label like $BACKUP / $MEMLOG / $SERVERLOG
+# above. Taken below, once every gate has passed.
+SNAPSHOT="$EVAL_DIR/logs/$LABEL-review.sh"
+
 SERVER_PID=""
 SAMPLER_PID=""
 cleanup() {
@@ -137,6 +156,47 @@ if [ "$served" -ne "$CTX" ]; then
   exit 1
 fi
 echo "=== arm $LABEL: server ready, serving n_ctx_slot=$served ==="
+
+# ONE snapshot, pinned across BOTH suites below. Letting each suite take its own
+# would reproduce, inside a single label, exactly the cross-session
+# misattribution this workstream exists to remove: one arm reporting two
+# different measured scripts. Exported AFTER the unset at the top of the file --
+# that unset is deliberate and stays; this is the one override an arm sets for
+# itself.
+#
+# Taken HERE, after every gate above (models.json rewrite, server liveness,
+# reachability, served-context assertion), so an arm that refuses to run leaves
+# no copy behind: a snapshot on disk asserts that suites were dispatched.
+#
+# Reused, loudly, when it already exists. LOCAL_REVIEW_ARM_SUITES exists to
+# finish a half-completed arm in a second invocation, and a fresh snapshot there
+# would let one label's eval rows and bigdiff rows measure two different scripts
+# -- the very failure this block prevents, surviving in the one workflow built
+# for resuming. This is why the name is label-keyed rather than random: within an
+# arm, reuse is the point. Re-running a COMPLETED arm under the same label
+# already double-counts its rows, so it is out of bounds for other reasons.
+if [ -f "$SNAPSHOT" ]; then
+  echo "run_ctx_tiers.sh: reusing the existing snapshot $SNAPSHOT for arm $LABEL" >&2
+  echo "run_ctx_tiers.sh: (resuming an arm measures the script it started with, not today's)" >&2
+  SNAPSHOT_OWNED=0
+else
+  SNAPSHOT_OWNED=1
+  cp "$REPO_ROOT/scripts/review.sh" "$SNAPSHOT" \
+    || { echo "run_ctx_tiers.sh: could not copy review.sh to $SNAPSHOT" >&2; rm -f "$SNAPSHOT"; exit 1; }
+fi
+# Checksummed from the COPY, so the reported version is the executed bytes.
+# A refusal here removes the copy only if THIS invocation made it -- the same
+# rule the model lock follows (never reclaim what you did not create). Deleting
+# a reused snapshot would orphan the transcripts an earlier invocation wrote,
+# and leaving an unreused one would let the resume branch above adopt an arm
+# that never dispatched anything.
+ARM_SHA=$(review_sha "$SNAPSHOT") \
+  || { if [ "$SNAPSHOT_OWNED" -eq 1 ]; then rm -f "$SNAPSHOT"; fi; exit 1; }
+LOCAL_REVIEW_SH="$SNAPSHOT"
+export LOCAL_REVIEW_SH
+# KEPT deliberately -- cleanup() must not delete it. Every .err this arm writes
+# names this path, so removing it on the way out orphans the transcripts.
+echo "=== arm $LABEL: snapshot $SNAPSHOT (sha256 $ARM_SHA) ==="
 
 # Which suites this arm runs. Defaults to both; exists so an arm interrupted
 # partway can be completed without re-running the half that already produced

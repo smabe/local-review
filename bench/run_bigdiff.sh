@@ -17,7 +17,9 @@
 set -uo pipefail
 
 EVAL_DIR="$(cd "$(dirname "$0")" && pwd)"
-REVIEW="${LOCAL_REVIEW_SH:-$EVAL_DIR/../scripts/review.sh}"
+# The script under test. What actually EXECUTES is REVIEW_RUN, a frozen copy
+# taken once below -- grep for that one to learn what a batch ran.
+REVIEW_SRC="${LOCAL_REVIEW_SH:-$EVAL_DIR/../scripts/review.sh}"
 REPO="$EVAL_DIR/bigdiff-repo"
 FIXTURE="$EVAL_DIR/bigdiff"
 RESULTS="$EVAL_DIR/results-bigdiff.tsv"
@@ -27,6 +29,47 @@ TIMEOUT="${LOCAL_REVIEW_BIGDIFF_TIMEOUT:-2400}"
 PROVIDER="$1"; MODEL="$2"; RUNS="${3:-1}"; LABEL="${4:?label required}"
 
 mkdir -p "$EVAL_DIR/logs"
+
+# Snapshot the reviewed script, identical in shape to run_eval.sh (which carries
+# the full reasoning): checksum first so a batch that cannot record its script
+# version leaves no copy behind, then one frozen copy per BATCH -- never per run,
+# and never the live file, which bash reads lazily and a mid-batch edit splices.
+review_sha() {
+  # An unreadable path is reported as itself, not folded into the no-tool case.
+  if [ ! -r "$1" ]; then
+    echo "run_bigdiff.sh: cannot read $1 -- no script to review" >&2
+    return 1
+  fi
+  _sha=$(shasum -a 256 "$1" 2>/dev/null | awk '{print $1}')
+  if [ -z "$_sha" ]; then _sha=$(sha256sum "$1" 2>/dev/null | awk '{print $1}'); fi
+  if [ -z "$_sha" ]; then
+    echo "run_bigdiff.sh: no working shasum or sha256sum -- refusing a batch whose script version cannot be recorded" >&2
+    return 1
+  fi
+  printf '%s' "${_sha:0:12}"
+}
+
+if [ -n "${LOCAL_REVIEW_SH:-}" ]; then
+  # The caller pinned a script (run_ctx_tiers.sh shares one snapshot across both
+  # suites). Use it as-is: do not re-snapshot, do not own its lifetime -- and so
+  # this batch cannot promise the pinned file is frozen; whoever set it owns that.
+  REVIEW_RUN="$REVIEW_SRC"
+  REVIEW_SHA=$(review_sha "$REVIEW_RUN") || exit 2
+  echo "run_bigdiff.sh: pinned review script $REVIEW_RUN (sha256 $REVIEW_SHA)" >&2
+else
+  # Trailing X's are mandatory -- BSD mktemp substitutes only a trailing run of
+  # them, and a literal-named template makes every later batch die "File exists".
+  REVIEW_RUN=$(mktemp "$EVAL_DIR/logs/$LABEL.review.sh.XXXXXX") \
+    || { echo "run_bigdiff.sh: could not create a snapshot of $REVIEW_SRC" >&2; exit 2; }
+  cp "$REVIEW_SRC" "$REVIEW_RUN" \
+    || { echo "run_bigdiff.sh: could not copy $REVIEW_SRC to $REVIEW_RUN" >&2; rm -f "$REVIEW_RUN"; exit 2; }
+  # Checksum the COPY, never the source: a save landing between the cp and the
+  # hash would stamp this batch with a version the executed bytes do not have.
+  REVIEW_SHA=$(review_sha "$REVIEW_RUN") || { rm -f "$REVIEW_RUN"; exit 2; }
+  # KEPT: this path is what bash names in a syntax error, so it must outlive the
+  # batch for the .err beside it to be readable.
+  echo "run_bigdiff.sh: snapshot $REVIEW_RUN (sha256 $REVIEW_SHA) of $REVIEW_SRC" >&2
+fi
 
 # Bootstrap once, like run_eval.sh: the base commit is the fixture's anchor, and
 # rebuilding it per run would mean a fresh commit per run. Hygiene against a
@@ -67,7 +110,7 @@ for run in $(seq 1 "$RUNS"); do
   if [ -s "$log.err" ]; then mv "$log.err" "$log.err.prev.$$"; fi
   t0=$(date +%s)
   # Word-split on purpose, like run_eval.sh: SINGLE-WORD flags only.
-  ( cd "$REPO" && bash "$REVIEW" --provider "$PROVIDER" --model "$MODEL" ${LOCAL_REVIEW_EVAL_ARGS:-} ) \
+  ( cd "$REPO" && bash "$REVIEW_RUN" --provider "$PROVIDER" --model "$MODEL" ${LOCAL_REVIEW_EVAL_ARGS:-} ) \
     > "$log" 2> "$log.err" &
   wpid=$!
   # Watchdog, identical in shape to run_eval.sh: TERM the deepest descendant

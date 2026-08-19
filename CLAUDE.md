@@ -20,7 +20,8 @@ gates a commit and never replaces a frontier-model review.
 ## Commands
 
 ```bash
-bash tests/test_local_review_audit.sh          # the suite (98 assertions); exit 0 = green
+bash tests/test_local_review_audit.sh          # gate 1: the audit suite; exit 0 = green
+bash tests/test_bench_runners.sh               # gate 2: the bench runners; needs bench/ (skips without it)
 LOCAL_REVIEW_MIRROR=~/projects/abe-skills bash tests/test_local_review_audit.sh   # include the drift checks
 python3 scripts/test_local_review_scope.py     # legacy diff-pipe scope tests
 python3 scripts/test_local_review_scope.py DefaultScopeIncludesUntracked.test_empty_repo_falls_back_to_untracked_only   # one case
@@ -34,9 +35,14 @@ bench/run_eval.sh    llamaserver <model-id> 2 <label>   # score a model: 5 seede
 bench/run_bigdiff.sh llamaserver <model-id> 2 <label>   # score a model: the 18KB fixture
 ```
 
-The audit suite has no per-test filter — it is one bash file with a
-`pass=/fail=/skipped=` footer. **Read `skipped=`**: the two drift checks report
-SKIP unless the private mirror is checked out, and a skip is not a pass.
+Both gates are one bash file with a `pass=/fail=/skipped=` footer and no
+per-test filter. **Read `skipped=`**: a skip is not a pass. In the audit suite
+the two drift checks SKIP unless the private mirror is checked out; the bench
+gate skips wholesale in a checkout without `bench/`. Do not hard-code a pass
+count — the pass/skipped split is checkout-dependent (from a git worktree the
+drift checks pass; from the main checkout with no mirror configured they skip).
+The invariant is `fail=0` with no decrease in `pass` against the same command
+before your change.
 
 The default provider is llamaserver: start the server yourself (it owns its
 model for the life of the process). A non-default provider must be paired with

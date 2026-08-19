@@ -344,4 +344,53 @@ plus one worktree prober that built phase `snapshot` for real.
 
 ## Findings log
 
-_(empty at plan time — workers append cross-phase findings as phases run)_
+- **2026-08-19 (snapshot).** `bash tests/test_local_review_audit.sh` **cannot run
+  under clu worker dispatch as-is.** Its `mktemp -d` at `:23` has no template, and
+  macOS `mktemp` resolves that through `_CS_DARWIN_USER_TEMP_DIR`
+  (`/var/folders/…`) while ignoring `TMPDIR` entirely — a path the worker sandbox
+  denies, so the suite dies at line 37 before a single assertion. Verified: with a
+  `PATH` shim redirecting the no-template form into `$TMPDIR` it is
+  `pass=100 fail=0 skipped=0`. The one-line fix is the idiom `scripts/review.sh:400`
+  already uses (`mktemp -d "${TMPDIR:-/tmp}/….XXXXXX"`), but that file is
+  byte-identical with the private mirror and is a **stated Non-goal** here, so no
+  phase may make it. `tests/test_bench_runners.sh` uses the TMPDIR-honouring form
+  and runs natively. Every later phase hits this at `clu verify` time.
+- **2026-08-19 (snapshot).** `review_sha()` is now hand-duplicated in all three
+  runners, and it **drifted between the first and second review round of this very
+  phase** (the `rm -f`-on-refusal cleanup landed in `run_eval.sh` and
+  `run_bigdiff.sh` but was missed in `run_ctx_tiers.sh`, leaving an orphan copy
+  that the resume branch would then adopt). That is the rule-of-three threshold
+  with the failure already demonstrated rather than predicted. Not extracted here:
+  a shared `bench/` library is cross-cutting — it changes the relocation contract
+  in `tests/test_bench_runners.sh` that phases 2–6 build their own tests on — and
+  the plan's Files-touched list does not carry it. **Scope for whoever takes it:
+  extract the snapshot/checksum block into one sourced `bench/` helper, add it to
+  the test harness's per-runner fixture list, and do it in a phase that already
+  edits all three runners (2, 3 or 5).**
+- **2026-08-19 (snapshot).** Two behaviours the old shape provided that this one
+  does not, per the sub-plan's instruction to state them rather than let a later
+  phase rediscover them. (1) `REVIEW` used to be the single name for "the script
+  under test"; it is now split into `REVIEW_SRC` (the tracked source) and
+  `REVIEW_RUN` (the frozen copy that actually executes). The old name is gone
+  from all three runners on purpose — a stale `$REVIEW` grep now finds nothing
+  rather than the wrong one. (2) The path named in a run's `.err` used to be a
+  tracked file whose history survived `rm -rf bench/logs`; it now names a
+  gitignored copy. A durability guarantee became a convention, written down in
+  `bench/README.md`: snapshots are deleted only together with the transcripts
+  that reference them, never before.
+- **2026-08-19 (snapshot).** `run_ctx_tiers.sh` keys its snapshot on the label
+  (`logs/$LABEL-review.sh`) and **reuses it when present**, which reads like a
+  violation of "never derive the snapshot name from the label alone" but is the
+  opposite case. `LOCAL_REVIEW_ARM_SUITES` exists to finish a half-done arm in a
+  *second invocation*; a fresh snapshot there would make one label's eval rows and
+  bigdiff rows measure two different scripts — this workstream's own failure mode,
+  surviving inside the one workflow built for resuming. Reuse is announced on
+  stderr, never silent. The two batch runners keep random `mktemp` names, where the
+  locked rule applies unchanged. **Phase 5 (resume) should treat this as prior
+  art**, and phase 2's `sha` column will make a same-label re-run visible in the
+  rows for the first time.
+- **2026-08-19 (snapshot).** A batch that cannot checksum its script exits **2**,
+  reusing the existing "refused before dispatch, nothing recorded" code rather
+  than inventing one. Phase 3 introduces a distinct infrastructure exit code and
+  should decide then whether a missing `shasum`/`sha256sum` belongs there instead
+  — it is an environment fault, not the fixture fault exit 2 otherwise means.

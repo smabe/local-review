@@ -8,7 +8,9 @@
 set -uo pipefail
 
 EVAL_DIR="$(cd "$(dirname "$0")" && pwd)"
-REVIEW="${LOCAL_REVIEW_SH:-$EVAL_DIR/../scripts/review.sh}"
+# The script under test. What actually EXECUTES is REVIEW_RUN, a frozen copy
+# taken once below -- grep for that one to learn what a batch ran.
+REVIEW_SRC="${LOCAL_REVIEW_SH:-$EVAL_DIR/../scripts/review.sh}"
 REPO="$EVAL_DIR/eval-repo"
 RESULTS="$EVAL_DIR/results.tsv"
 TIMEOUT="${LOCAL_REVIEW_EVAL_TIMEOUT:-900}"
@@ -29,6 +31,63 @@ for c in $CASES; do
 done
 
 mkdir -p "$EVAL_DIR/logs"
+
+# Checksum the script this batch will execute. shasum is perl (present on macOS,
+# not guaranteed on a minimal Linux); sha256sum is coreutils (the reverse), and
+# the repo has no existing checksum idiom to copy -- so try both and take the
+# first that yields a hash. Empty output covers "not installed" and "installed
+# but broken" alike.
+review_sha() {
+  # Report an unreadable path as itself. Folding it into the no-tool message
+  # below would send the operator after a missing coreutils that is right there.
+  if [ ! -r "$1" ]; then
+    echo "run_eval.sh: cannot read $1 -- no script to review" >&2
+    return 1
+  fi
+  _sha=$(shasum -a 256 "$1" 2>/dev/null | awk '{print $1}')
+  if [ -z "$_sha" ]; then _sha=$(sha256sum "$1" 2>/dev/null | awk '{print $1}'); fi
+  if [ -z "$_sha" ]; then
+    echo "run_eval.sh: no working shasum or sha256sum -- refusing a batch whose script version cannot be recorded" >&2
+    return 1
+  fi
+  printf '%s' "${_sha:0:12}"
+}
+
+# Measure a FROZEN COPY, never the live file. Bash reads a script lazily from a
+# byte offset, so editing scripts/review.sh mid-batch splices a running run (one
+# exit-127 death already paid for) and, worse, silently lets two runs under one
+# label measure two different scripts. ONE copy per BATCH, never per run: an
+# experiment measures one script version.
+#
+# Placed after the unknown-case check above, and every failure below removes the
+# copy it made: a snapshot on disk asserts that a batch reached dispatch.
+if [ -n "${LOCAL_REVIEW_SH:-}" ]; then
+  # The caller already pinned a script (run_ctx_tiers.sh does exactly this to
+  # share one snapshot across both its suites). Use it as-is: do not re-snapshot,
+  # and do not own its lifetime -- which also means this batch cannot promise the
+  # pinned file is frozen. Whoever set the variable owns that.
+  REVIEW_RUN="$REVIEW_SRC"
+  REVIEW_SHA=$(review_sha "$REVIEW_RUN") || exit 2
+  echo "run_eval.sh: pinned review script $REVIEW_RUN (sha256 $REVIEW_SHA)" >&2
+else
+  # The X's must be TRAILING: BSD mktemp substitutes only a trailing run of
+  # them, so a "$LABEL-XXXXXX.review.sh" template creates a file named literally
+  # that and every later batch dies "File exists" -- reusing one snapshot across
+  # batches, the precise thing this block exists to prevent. Never keyed on the
+  # label alone, for the same reason.
+  REVIEW_RUN=$(mktemp "$EVAL_DIR/logs/$LABEL.review.sh.XXXXXX") \
+    || { echo "run_eval.sh: could not create a snapshot of $REVIEW_SRC" >&2; exit 2; }
+  cp "$REVIEW_SRC" "$REVIEW_RUN" \
+    || { echo "run_eval.sh: could not copy $REVIEW_SRC to $REVIEW_RUN" >&2; rm -f "$REVIEW_RUN"; exit 2; }
+  # Checksum the COPY, never the source: a save landing between the cp and the
+  # hash would stamp this batch with a version the executed bytes do not have --
+  # the same misattribution the snapshot exists to prevent, one step earlier.
+  REVIEW_SHA=$(review_sha "$REVIEW_RUN") || { rm -f "$REVIEW_RUN"; exit 2; }
+  # KEPT, not cleaned up: `bash "$REVIEW_RUN"` makes this path the one bash names
+  # in a syntax error, so it has to still exist when someone reads the .err.
+  echo "run_eval.sh: snapshot $REVIEW_RUN (sha256 $REVIEW_SHA) of $REVIEW_SRC" >&2
+fi
+
 if [ ! -d "$REPO/.git" ]; then
   mkdir -p "$REPO"
   cp "$EVAL_DIR"/base/*.py "$REPO/"
@@ -62,7 +121,7 @@ for run in $(seq 1 "$RUNS"); do
 
     log="$EVAL_DIR/logs/$LABEL-$c-r$run.txt"
     t0=$(date +%s)
-    ( cd "$REPO" && bash "$REVIEW" --provider "$PROVIDER" --model "$MODEL" $EXTRA_ARGS ) \
+    ( cd "$REPO" && bash "$REVIEW_RUN" --provider "$PROVIDER" --model "$MODEL" $EXTRA_ARGS ) \
       > "$log" 2> "$log.err" &
     wpid=$!
     # Watchdog: TERM only this run's pi (review.sh defers its TERM trap while

@@ -109,8 +109,13 @@ Two voided runs kept for the record: `qwen38-nothink-vfy-b` /
 `-sc-b` rows (exit 1, 0s) were lock-refusals while the first bigdiff-verify
 attempt held the model, and `qwen38-nothink-vfy-big` (exit 127) died because
 review.sh was edited while that run's bash was still reading it — bash splices
-mid-word on a changed file offset. Process rule adopted: never edit review.sh
-while a bench run is in flight.
+mid-word on a changed file offset. The process rule adopted at the time — never
+edit review.sh while a bench run is in flight — is now a historical note: each
+bench batch copies `scripts/review.sh` once at batch start and runs the copy, so
+editing the live file mid-batch can no longer reach a running review. **The
+protection covers `review.sh` only.** The runners themselves are still read
+incrementally by bash, so editing `bench/run_eval.sh`, `bench/run_bigdiff.sh` or
+`bench/run_ctx_tiers.sh` mid-batch splices them exactly as this run was spliced.
 
 Future work (filed, not shipped): a verify-aware bench scorer — run_eval's
 columns predate verification and mis-read refuted-catch runs (see

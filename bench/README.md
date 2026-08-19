@@ -89,6 +89,56 @@ half-finished, rather than re-running the half that already produced valid rows.
 Both fixture repos (`eval-repo/`, `bigdiff-repo/`) are gitignored and bootstrap
 on first use. Both runners skip that bootstrap if the repo already exists.
 
+### The reviewed script is frozen per batch
+
+Each batch copies `scripts/review.sh` once, into `logs/<label>.review.sh.<rand>`,
+and every run in that batch executes the copy. The batch announces it on stderr
+before dispatching anything:
+
+```
+run_eval.sh: snapshot /…/bench/logs/my-arm.review.sh.a1B2c3 (sha256 4f9c1e02ab77) of /…/scripts/review.sh
+```
+
+One copy per **batch**, never per run: an experiment measures one script
+version, and a per-run copy would let a mid-batch edit change the measured
+artifact silently — which is worse than crashing, because nothing in the results
+would show it. The name is never derived from the label alone, or a second batch
+under one label would re-measure the first batch's script.
+
+`run_ctx_tiers.sh` takes **one** snapshot and exports `LOCAL_REVIEW_SH` over it,
+so both suites in an arm measure the same copy. It keys that copy on the label
+and **reuses it** when it is already there, so finishing a half-done arm with
+`LOCAL_REVIEW_ARM_SUITES` measures the script the arm started with rather than
+today's — it says so on stderr when it does.
+
+Setting `LOCAL_REVIEW_SH` yourself pins any other script: a batch that finds it
+already set uses that path as-is, takes no snapshot, and does not own its
+lifetime. **A pinned script is therefore not frozen.** Nothing stops an edit to
+it from reaching a run in flight, which is the whole failure this section
+otherwise removes — so if you are benching a script you are still editing, copy
+it yourself and pin the copy.
+
+The checksum is truncated to 12 hex chars, via `shasum -a 256` falling back to
+`sha256sum` (neither is universal — the first is perl, the second coreutils),
+and it is taken from the **copy**, so the reported version is the bytes that
+actually ran. A batch that can find neither tool **refuses to run** rather than
+record a blank version.
+
+A batch refused *before it dispatches anything* — unknown case name, unreadable
+script, no checksum tool — leaves no copy behind, so a snapshot on disk means
+that batch reached dispatch. The per-run fixture guards that fire later
+(`run_bigdiff.sh`'s `git apply` check, `run_eval.sh`'s marker-drift check) can
+leave one; it is inert, and nothing but its own `logs/` neighbours name it.
+
+**Snapshots are kept, and are deleted only together with the transcripts that
+reference them — never before.** `bash <snapshot>` makes that path the one bash
+names in an error, so `logs/<label>-<case>-r<n>.txt.err` can read
+`…/logs/my-arm.review.sh.a1B2c3: line 408: ll: command not found` and mean
+nothing at all once the copy is gone. This is a real trade: the path in an
+`.err` used to name a tracked file whose history survived `rm -rf bench/logs`,
+and now names a gitignored copy that does not. The durability guarantee became
+a convention, and this paragraph is the convention.
+
 ## Reading the results
 
 `results.tsv` — one row per small-case run:
@@ -127,7 +177,10 @@ visible from reading the code.
 **Never edit a shell script while it is executing.** Bash reads scripts lazily
 from a byte offset, so a running process resumes into shifted content and dies
 on a syntax error. This killed a context-tier arm after its small cases and cost
-its entire big-diff half.
+its entire big-diff half. `review.sh` is now covered — each batch runs a frozen
+copy of it — but **the runners themselves are not**: `run_eval.sh`,
+`run_bigdiff.sh` and `run_ctx_tiers.sh` are still read incrementally by the bash
+executing them, so editing one mid-batch splices it exactly as before.
 
 **A real catch can be quoted from either end of a two-line defect.** The
 import-after-guard bug was reported once against the registration line and once
