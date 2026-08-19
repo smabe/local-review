@@ -5,19 +5,22 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this repo is
 
 A local, offline code reviewer driven by the
-[pi](https://github.com/earendil-works/pi) agent harness against any
-OpenAI-compatible endpoint — LM Studio (MLX) or llama-server today, and any
-model declared in `~/.pi/agent/models.json` via `--provider` / `--model`.
-Qwen3.8-27B with thinking disabled (llama-server) is the measured default;
-Qwen3-Coder-30B on LM Studio is the fast tier for small diffs — it false-cleans
-large ones (bench/ holds the evidence for both). `scripts/review.sh` is the
-whole product — everything else is a test, the bench, or a legacy path. It is an **advisory pre-pass**; it never
+[pi](https://github.com/earendil-works/pi) agent harness against a local
+OpenAI-compatible endpoint. The model is not fixed: any id declared in
+`~/.pi/agent/models.json` runs via `--provider` / `--model`, under either of
+the two providers review.sh accepts (`llamaserver`, `lmstudio` —
+`scripts/review.sh:83`). The shipped defaults are the two that were measured:
+Qwen3.8-27B with thinking disabled (llama-server) for accuracy, Qwen3-Coder-30B
+(LM Studio) as a fast tier for small diffs only — it false-cleans large ones.
+bench/ holds the evidence for both and is the instrument for scoring a
+replacement. `scripts/review.sh` is the whole product — everything else is a
+test, the bench, or a legacy path. It is an **advisory pre-pass**; it never
 gates a commit and never replaces a frontier-model review.
 
 ## Commands
 
 ```bash
-bash tests/test_local_review_audit.sh          # the suite (60+ assertions); exit 0 = green
+bash tests/test_local_review_audit.sh          # the suite (74 assertions); exit 0 = green
 LOCAL_REVIEW_MIRROR=~/projects/abe-skills bash tests/test_local_review_audit.sh   # include the drift checks
 python3 scripts/test_local_review_scope.py     # legacy diff-pipe scope tests
 python3 scripts/test_local_review_scope.py DefaultScopeIncludesUntracked.test_empty_repo_falls_back_to_untracked_only   # one case
@@ -26,6 +29,9 @@ scripts/llama_server.sh                        # serve the default reviewer firs
 scripts/review.sh                              # run a review of the working tree
 scripts/review.sh --json                       # same, printing pi's raw event stream
 scripts/review.sh --provider lmstudio --model qwen/qwen3-coder-30b   # fast tier, small diffs
+
+bench/run_eval.sh    llamaserver <model-id> 2 <label>   # score a model: 5 seeded one-bug diffs
+bench/run_bigdiff.sh llamaserver <model-id> 2 <label>   # score a model: the 18KB fixture
 ```
 
 The audit suite has no per-test filter — it is one bash file with a
@@ -132,6 +138,11 @@ above 49152 unmeasured; full-window prefill ~8 min). The one 96K attempt on
 MLX/LM Studio wired ~35 GB and kernel-panicked the machine — we keep MLX at
 49152 ourselves.
 
+Runs on **macOS and Linux**, so no BSD-only spellings: `mktemp` takes an
+explicit `.XXXXXX` template (GNU coreutils rejects a template with fewer than
+three X's, which killed the run on Linux), and the same care applies to `sed
+-i`, `stat`, and `date`. Only the timings are Apple-Silicon-specific.
+
 Targets **bash 3.2** (macOS system bash): guard empty array expansion as
 `${a[@]+"${a[@]}"}` under `set -u`. In the EXIT trap every branch is a full `if`
 — bash adopts the trap's last command status, and a trailing failed test would
@@ -139,8 +150,10 @@ rewrite a 0/3/4 into 1 and void the exit contract.
 
 ## Peripheral files
 
-`scripts/llama_server.sh` is the fallback engine (~25% slower, zero crashes
-observed). `scripts/local_review.py` is the legacy diff-pipe with no agent loop,
+`scripts/llama_server.sh` serves the default engine (~25% slower per token than
+MLX, zero crashes observed, which is why it is the default) — bare it serves the
+measured reviewer GGUF, and it takes a path plus flags for any other model.
+`scripts/local_review.py` is the legacy diff-pipe with no agent loop,
 useful only with *thinking* models — do not point the coder model at it, since
 diff-blind it fabricates. `skill/SKILL.md` is what gets copied to
 `~/.claude/skills/local-review/`; it duplicates the operational guidance by

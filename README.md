@@ -1,13 +1,10 @@
 # local-review
 
-A free, private, offline code reviewer that runs on your own Mac:
-**Qwen3.8-27B with thinking disabled**, served by llama-server and driven
-by the [pi](https://github.com/earendil-works/pi) agent harness. It runs
-`git diff`, reads your changed files, and reports correctness bugs —
-about a minute on a small diff, up to ~15 minutes on a large one — touching
-no network. A second tier, **Qwen3-Coder-30B** on LM Studio, reviews a
-small diff in ~5 seconds but false-cleans large ones (measured — see
-`bench/`); use it only when the diff is small and the clock matters.
+A free, private, offline code reviewer that runs on your own machine. It
+drives a local model — anything you can serve on an OpenAI-compatible
+endpoint, llama-server or LM Studio — through the
+[pi](https://github.com/earendil-works/pi) agent harness: it runs `git diff`,
+reads your changed files, and reports correctness bugs, touching no network.
 
 It is an **advisory pre-pass**, not a replacement for a frontier-model
 review: its blind spots are real but *uncorrelated* with the big models',
@@ -15,9 +12,31 @@ which is exactly what makes a second opinion worth having. A false
 positive costs you a minute of reading; a false negative costs nothing if
 a real review still gates your commits.
 
-**Requirements:** Apple Silicon Mac with ~32 GB+ unified memory (the model
-takes ~23 GB), Node.js/npm, llama.cpp (`brew install llama.cpp`).
+### Which model
+
+Your choice — declare it in `~/.pi/agent/models.json` and select it with
+`--provider` / `--model`. Two are measured here and ship as the defaults:
+
+| tier | model | speed | use it for |
+|---|---|---|---|
+| **accuracy** (default) | Qwen3.8-27B, thinking disabled, on llama-server | ~1 min small diff, up to ~15 min large | everything |
+| **fast** | Qwen3-Coder-30B on LM Studio | ~5 s small diff | small diffs only — it false-cleans large ones |
+
+Those numbers are measured, not estimated; `bench/` holds the evidence and is
+the instrument for scoring any other model you want to try. The
+["Model choice" rule](#hard-rules-each-one-was-paid-for) below records what
+the rejected candidates scored.
+
+**Requirements:** macOS or Linux, with enough memory to run the model you
+choose — RAM on a unified-memory Mac, VRAM (or RAM, slowly) on a Linux box.
+The default reviewer weighs ~23 GB, so ~32 GB is the comfortable floor for
+it; a smaller model asks for less. Plus git, Node.js/npm, python3, curl, and
+llama.cpp (`brew install llama.cpp`, or build it from source).
 [LM Studio](https://lmstudio.ai) only if you want the fast tier.
+
+Everything here was *measured* on Apple Silicon. The accuracy numbers are
+properties of the model and the prompt and carry over; the timings are not —
+expect different wall-clock on different hardware.
 
 ---
 
@@ -31,7 +50,7 @@ takes ~23 GB), Node.js/npm, llama.cpp (`brew install llama.cpp`).
 ### 1. Serve the model
 
 ```bash
-# Download the reviewer GGUF (~21 GB, one time)
+# Download the default reviewer GGUF (~21 GB, one time)
 mkdir -p ~/models && curl -L -o ~/models/Qwen3.8-27B-Q6_K.gguf \
   "https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/main/Qwen3.8-27B-Q6_K.gguf"
 
@@ -42,6 +61,12 @@ scripts/llama_server.sh
 ```
 
 Verify: `curl -s http://localhost:8080/health` returns `{"status":"ok"}`.
+
+Serving a different model instead: pass its path and any flags it needs —
+`scripts/llama_server.sh ~/models/your-model.gguf --whatever` — and add a
+matching entry to `~/.pi/agent/models.json` (step 2). The script never
+substitutes a model silently: with no path it serves the measured default or
+tells you it cannot find it.
 
 Optional fast tier (small diffs only), via LM Studio:
 
@@ -64,6 +89,12 @@ Copy [`models.example.json`](models.example.json) from this repo to
 `~/.pi/agent/models.json`. If the user already has a `models.json`, merge
 both provider blocks into it instead of overwriting. Do not add
 JSON comments — they fail silently.
+
+Any other model gets an entry alongside these two, under whichever of the
+two providers serves it, and is then selected with `--provider` / `--model`.
+The id must match what the server actually answers to: pi forwards an id its
+provider never declared without complaining, and the per-model sampling
+settings then silently do not apply.
 
 Verify (first call wakes the model and can take ~60s; a repeat should
 round-trip in 1–2s):
@@ -98,13 +129,21 @@ and audits the result. Nothing needs assembling by hand. On the lmstudio
 fast tier it additionally loads the model if it is not already resident and
 unloads it afterwards.
 
+| flag | what it does |
+|---|---|
+| `--intent "<sentence>"` | judge the diff against a stated purpose — read the caveat below before using it |
+| `--rounds N` | tool-call budget, default 3; raise to 4–5 when the review needs a codebase search pass |
+| `--json` | print pi's raw event stream instead of the review; every run is audited either way |
+| `--provider NAME` | `llamaserver` (default) or `lmstudio` |
+| `--model ID` | model id as declared in `~/.pi/agent/models.json`; required whenever `--provider` is not the default |
+
 One machine has one resident model, so reviews are serialised: a run holds a
 lock for its whole duration, and a second run started while it is held exits
 immediately naming the process that holds it.
 
 Verify: in a repo with a deliberate bug, the script reports it as
 `FILE: path/to/file.py:LINE | confidence: ... / QUOTE: ... / DEFECT: ... / FAILURE: ...`
-followed by an audit line reading `audit: N tool call(s), 1 defect(s)`.
+followed by an audit line reading `audit: N/N tool calls ok, 1 defect(s), … tokens peak`.
 
 ---
 
@@ -127,9 +166,11 @@ overhead. (Claude Code *invoking* pi via the skill is fine — pi is the
 harness, Claude just launches it.)
 
 The review prompt carries a hard cap ("at most 3 rounds of tool calls,
-batch commands") which is **stability-critical**: LM Studio's MLX engine
+batch commands") which is **stability-critical** on LM Studio: its MLX engine
 crashes on long single generations (~11K tokens). Capped rounds plus
-`maxTokens: 8192` keep every generation under the threshold.
+`maxTokens: 8192` keep every generation under the threshold. llama-server has
+not shown the problem, but the cap is the default on both paths — every
+accuracy number here was measured with it in place.
 
 ### The system prompt is the quality lever
 
@@ -171,7 +212,7 @@ counts tool calls and structured defects, and prints them beneath the
 review:
 
 ```
-local-review: audit: 4 tool call(s), 1 defect(s), 8672 tokens peak
+local-review: audit: 4/4 tool calls ok, 1 defect(s), 8672 tokens peak
 ```
 
 The exit status carries the verdict, so a caller never has to parse prose:
@@ -213,17 +254,22 @@ someone else's stated intent.
 | File | What it is |
 |---|---|
 | `scripts/review.sh` | **The entry point.** Preconditions, model load/unload, prompt assembly, and the run audit |
-| `tests/test_local_review_audit.sh` | 60+ assertions over the audit, the model lock, and argument validation. The code under test is extracted from `review.sh` at run time, so the tests cannot pass against a stale copy. Run with `bash tests/test_local_review_audit.sh`. Two drift checks report `SKIP` unless you also have the private repo checked out and point `LOCAL_REVIEW_MIRROR` at it — they compare this copy against its counterpart, which a standalone clone has nothing to compare to. `skipped=` in the footer is the count |
+| `tests/test_local_review_audit.sh` | 74 assertions over the audit, the model lock, and argument validation. The code under test is extracted from `review.sh` at run time, so the tests cannot pass against a stale copy. Run with `bash tests/test_local_review_audit.sh`. Two drift checks report `SKIP` unless you also have the private repo checked out and point `LOCAL_REVIEW_MIRROR` at it — they compare this copy against its counterpart, which a standalone clone has nothing to compare to. `skipped=` in the footer is the count |
 | `skill/SKILL.md` | The Claude Code skill — invocation, the intent caveat, hard limits |
-| `models.example.json` | pi provider config for LM Studio (:1234) and llama-server (:8080) |
-| `docs/model-choice.md` | Decision record: why this model, the prompts, the settings, the harness |
-| `scripts/llama_server.sh` | Serves the default reviewer (Qwen3.8 GGUF, thinking off) via llama-server on :8080; pass a path + flags for anything else |
+| `models.example.json` | pi provider config for LM Studio (:1234) and llama-server (:8080); the template for adding your own model |
+| `bench/` | The measurement instrument: seeded-defect cases, an 18KB big-diff fixture, frontier-model transcripts to score against, and the runners that replay them through the real `review.sh`. This is how you check whether a different model holds up |
+| `docs/model-choice.md` | Decision record: why these models, the prompts, the settings, the harness |
+| `docs/evict-gap.md` | How the purpose-anchored prompt (v7) was measured, and what it moved |
+| `docs/angle-removed-behavior.md` | The removed-guard experiment behind the `removedguard` bench case |
+| `scripts/llama_server.sh` | Serves a GGUF via llama-server on :8080 — the measured default reviewer when called bare, or any model you pass a path and flags for |
 | `scripts/local_review.py` | Legacy diff-pipe: posts a diff straight to the API, no agent loop. Only useful with *thinking* models, which review diffs well but are too slow to finish agentically. Do NOT use the coder model with it — diff-blind, it fabricates findings |
 | `scripts/test_local_review_scope.py` | Regression tests for the diff-pipe's review scope (untracked files, empty repos) |
 
 ## Hard rules (each one was paid for)
 
-- **Model: Qwen3.8-27B no-think default; Qwen3-Coder-30B fast tier.** The
+- **The model is a recommendation; these are the scores behind it.** Nothing
+  in the script enforces a model — the defaults are simply the two that
+  survived measurement, and `bench/` will score whatever you swap in. The
   bench/ seeded-defect eval (2026-08-18, both engines) scored Qwen3-Coder
   6/8 trusted catches (zero false positives under the shipped prompt; two mid-iteration prompt variants did produce clean-diff fabrications) at ~5s a review; it reliably
   misses the hardest case (a swallowed error path causing silent data loss).
@@ -257,6 +303,29 @@ someone else's stated intent.
 - **After a reboot**, the model may load while the API server stays down:
   `lms server status` / `lms server start`. A dead server shows up in pi
   as a bare "Connection error."
+
+## Trying a different model
+
+Serve it, declare it, run the bench against it:
+
+```bash
+scripts/llama_server.sh ~/models/your-model.gguf        # or load it in LM Studio
+# add a matching entry to ~/.pi/agent/models.json, then:
+scripts/review.sh --provider llamaserver --model your-model-id
+
+# score it: PROVIDER MODEL RUNS LABEL
+bench/run_eval.sh    llamaserver your-model-id 2 yourmodel   # 5 seeded one-bug diffs
+bench/run_bigdiff.sh llamaserver your-model-id 2 yourmodel   # the 18KB fixture
+```
+
+Results append to `bench/results.tsv` and `bench/results-bigdiff.tsv`, with the
+full transcripts under `bench/logs/`. Read `bench/README.md` before judging the
+numbers — the `clean` case measures fabrication, and the big-diff run is the
+one that separates a model that reviews from a model that agrees.
+
+Two things to hold onto whatever you serve: `--parallel 1` (pi is a single
+client, and parallel slots split the context N ways), and the round cap, which
+is a stability guard rather than a speed knob.
 
 ## Context sizing — a suggestion, not a rule
 

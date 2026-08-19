@@ -1,6 +1,6 @@
 ---
 name: local-review
-description: Run a free, private code review on a local LLM (Qwen3.8-27B no-think via llama-server by default; Qwen3-Coder-30B on LM Studio as the small-diff fast tier) using the pi agent harness. Advisory pre-pass only — it never replaces the real review gate. Use when the user asks for a local review, a free second opinion on a diff, or offline review.
+description: Run a free, private code review on a local LLM served on this machine (llama-server or LM Studio) using the pi agent harness — the shipped default is Qwen3.8-27B no-think, with a Qwen3-Coder-30B fast tier for small diffs, and any other model selectable with --provider/--model. Advisory pre-pass only — it never replaces the real review gate. Use when the user asks for a local review, a free second opinion on a diff, or offline review.
 ---
 
 # local-review — code review on a local model
@@ -28,7 +28,7 @@ to get subtly wrong.
 | `--intent "<sentence>"` | you made the change and can state its purpose — read the caveat below first |
 | `--rounds N` | default 3; raise to 4–5 when the review needs a codebase search pass |
 | `--json` | print pi's raw event stream instead of the review |
-| `--provider` / `--model` | switch engine/model — e.g. `--provider lmstudio --model qwen/qwen3-coder-30b` for the ~5s fast tier on SMALL diffs (it false-cleans large ones) |
+| `--provider` / `--model` | switch engine/model — any id declared in `~/.pi/agent/models.json`, under `llamaserver` or `lmstudio`. E.g. `--provider lmstudio --model qwen/qwen3-coder-30b` for the ~5s fast tier on SMALL diffs (it false-cleans large ones) |
 
 **It manages the model for you** (LM Studio only). If the model isn't resident
 it clears what is loaded, loads it at 49152 context, and unloads it when the
@@ -131,7 +131,11 @@ claims you have not checked against the source.
   the prompt (component map + behavioural contract), which flips it to a
   correct verdict — but that is verification against an authored spec, not
   discovery, and a stale block blinds it.
-- **Model choice: Qwen3.8-27B no-think default; Qwen3-Coder-30B fast tier.** A
+- **Model choice is open; the defaults are just what survived measurement.**
+  Nothing in the script pins a model — serve another one and select it with
+  `--provider`/`--model`, and score it with the repo's `bench/` before trusting
+  it. What the candidates scored: Qwen3.8-27B no-think is the default,
+  Qwen3-Coder-30B the fast tier. A
   5-case seeded-defect eval (4 planted bugs + 1 clean diff, 2+ runs per arm,
   both engines, 2026-08-18) scored Qwen3-Coder 6/8 catches with zero false
   positives at ~5s/review — it reliably misses the hardest case (a swallowed
@@ -159,10 +163,11 @@ claims you have not checked against the source.
 
 ## Engines
 
-llama-server is the default engine: `"$LR"/scripts/llama_server.sh` serves the
-reviewer GGUF on :8080 (Qwen3.8, thinking disabled — the measured
-configuration) and owns the model for the life of the process; zero crashes
-observed across the whole experiment. LM Studio (MLX) is the fast tier:
+llama-server is the default engine: `"$LR"/scripts/llama_server.sh` serves a
+GGUF on :8080 and owns it for the life of the process — called bare it serves
+the measured default (Qwen3.8, thinking disabled), and it takes a model path
+plus flags for anything else. Zero crashes observed across the whole
+experiment. LM Studio (MLX) is the fast tier:
 review.sh manages its model lifecycle for you, but its engine dies on long
 single generations — the 3-round budget exists because of it — and thinking
 cannot be controlled through its API.

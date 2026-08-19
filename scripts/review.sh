@@ -102,7 +102,8 @@ esac
 
 # --- preconditions -----------------------------------------------------------
 
-command -v pi >/dev/null 2>&1 || die "pi is not on PATH -- install it first (brew install pi)"
+command -v pi >/dev/null 2>&1 \
+  || die "pi is not on PATH -- install it first: npm install -g @earendil-works/pi-coding-agent"
 command -v python3 >/dev/null 2>&1 || die "python3 is not on PATH (needed to audit the run)"
 
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
@@ -326,7 +327,10 @@ run_pi() {
     -p "$PROMPT" </dev/null
 }
 
-RAW=$(mktemp -t local-review) || die "could not create a temp file"
+# Spelled with an explicit template, not the BSD `mktemp -t NAME` shorthand:
+# GNU coreutils requires at least three consecutive X's and errors out on a
+# template without them, which killed the run on Linux before pi ever started.
+RAW=$(mktemp "${TMPDIR:-/tmp}/local-review.XXXXXX") || die "could not create a temp file"
 RC=0
 run_pi >"$RAW" || RC=$?
 
