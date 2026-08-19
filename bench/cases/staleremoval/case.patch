@@ -1,0 +1,13 @@
+diff --git a/parser.py b/parser.py
+index 6e4e38e..236d8e9 100644
+--- a/parser.py
++++ b/parser.py
+@@ -13,7 +13,7 @@ def parse_config(text):
+         if not line or line.startswith("#"):
+             continue
+         if "=" not in line:
+-            raise ValueError(f"line {lineno}: expected KEY=VALUE, got {raw!r}")
++            continue  # tolerate junk lines from hand-edited configs
+         key, _, value = line.partition("=")
+         key = key.strip()
+         value = value.strip()

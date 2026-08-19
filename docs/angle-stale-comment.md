@@ -150,7 +150,11 @@ Fabrications across all valid runs, every arm: zero. Decision rule conditions
   Measured 2/2: v7's purpose method turns a stale docstring over correct code
   into a confident false positive against the code. The angle pass is the
   attribution-correcting counterpart.
-- **Limit, untested here: removal-shaped staleness.** This fixture has an added
+- **Removal-shaped staleness: measured covered** (2026-08-19,
+  `docs/angle-stale-removal.md`): 3/3 on a docstring whose implementing raise
+  the diff removed, while the default pass went 1×fully-clean (the healthdata
+  shape reproduced) and 1×misattributed. Original caveat below kept verbatim.
+- **(original caveat) Limit, untested at ship time: removal-shaped staleness.** This fixture has an added
   line that directly contradicts the docstring. The motivating real-world miss
   (healthdata) was a comment describing REMOVED behaviour with no contradicting
   added line. That shape is the next experiment
