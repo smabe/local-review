@@ -7,10 +7,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 A local, offline code reviewer driven by the
 [pi](https://github.com/earendil-works/pi) agent harness against a local
 OpenAI-compatible endpoint. The model is not fixed: any id declared in
-`~/.pi/agent/models.json` runs via `--provider` / `--model`, under either of
-the two providers review.sh accepts (`llamaserver`, `lmstudio` —
-`scripts/review.sh:83`). The shipped defaults are the two that were measured:
-Qwen3.8-27B with thinking disabled (llama-server) for accuracy, Qwen3-Coder-30B
+`~/.pi/agent/models.json` runs via `--provider` / `--model`, under any of
+the three providers review.sh accepts (`llamaserver`, `mtplx`, `lmstudio` —
+`scripts/review.sh:106`). The shipped defaults are the two that were measured:
+Qwen3.8-27B on llama-server for accuracy (served with `--reasoning-budget 0`,
+which is inert, so it thinks — and must: docs/thinking-off.md), Qwen3-Coder-30B
 (LM Studio) as a fast tier for small diffs only — it false-cleans large ones.
 bench/ holds the evidence for both and is the instrument for scoring a
 replacement. `scripts/review.sh` is the whole product — everything else is a
@@ -30,6 +31,7 @@ scripts/llama_server.sh                        # serve the default reviewer firs
 scripts/review.sh                              # run a review of the working tree
 scripts/review.sh --json                       # same, printing pi's raw event stream
 scripts/review.sh --provider lmstudio --model qwen/qwen3-coder-30b   # fast tier, small diffs
+scripts/review.sh --provider mtplx --model qwen38-mtplx                # MTPLX daemon on :8000 (docs/mtplx.md)
 
 bench/run_eval.sh    llamaserver <model-id> 2 <label>   # score a model: 5 seeded one-bug diffs
 bench/run_bigdiff.sh llamaserver <model-id> 2 <label>   # score a model: the 18KB fixture
@@ -45,7 +47,13 @@ The invariant is `fail=0` with no decrease in `pass` against the same command
 before your change.
 
 The default provider is llamaserver: start the server yourself (it owns its
-model for the life of the process). A non-default provider must be paired with
+model for the life of the process). `LOCAL_REVIEW_PROVIDER` / `LOCAL_REVIEW_MODEL`
+in the environment change the default for one machine without changing the
+shipped one. `mtplx` is the same shape as llamaserver — the MTPLX app or
+`mtplx quickstart --port 8000` owns the model, review.sh only curls
+`:8000/v1/models`; its entry runs thinking ON (measured 3 runs per case:
+swallow 0/3, leak 2/3, the rest 3/3, clean 0 — fast, not the accuracy pick;
+docs/mtplx.md). A non-default provider must be paired with
 an explicit `--model` (pi silently forwards an id its provider never declared,
 so the per-model sampling settings just do not apply); lmstudio models are
 auto-loaded and unloaded by review.sh. LM Studio lifecycle by hand:

@@ -48,6 +48,37 @@
           }
         }
       ]
+    },
+    "mtplx": {
+      "baseUrl": "http://127.0.0.1:8000/v1",
+      "api": "openai-completions",
+      "apiKey": "mtplx-local",
+      "authHeader": true,
+      "headers": {
+        "x-mtplx-client": "pi",
+        "x-mtplx-tool-prompt-mode": "native"
+      },
+      "compat": {
+        "supportsDeveloperRole": false,
+        "supportsReasoningEffort": true,
+        "thinkingFormat": "qwen",
+        "maxTokensField": "max_tokens"
+      },
+      "models": [
+        {
+          "id": "qwen38-mtplx",
+          "name": "Qwen3.8-27B MTPLX Optimized-Speed, thinking on (MTPLX :8000)",
+          "reasoning": true,
+          "contextWindow": 49152,
+          "maxTokens": 8192,
+          "samplingParams": {
+            "temperature": 0.7,
+            "top_p": 0.8,
+            "top_k": 20,
+            "min_p": 0.0
+          }
+        }
+      ]
     }
   }
 }

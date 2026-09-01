@@ -336,6 +336,12 @@ arg_is "--provider with no value"           2 --provider
 # The default model id is a llama-server one; pi forwards an id the provider
 # never defined rather than rejecting it, so the pairing is enforced up front.
 arg_is "lmstudio without --model"           2 --provider lmstudio
+arg_is "mtplx without --model"              2 --provider mtplx
+# Environment defaults go through the same validation as the flags.
+( cd "$TMP" && LOCAL_REVIEW_PROVIDER=bogus bash "$SCRIPT" --model x >/dev/null 2>&1 ); rc=$?
+[ "$rc" -eq 2 ] && ok || bad "LOCAL_REVIEW_PROVIDER=bogus should be a usage error, got $rc"
+( cd "$TMP" && LOCAL_REVIEW_PROVIDER=mtplx bash "$SCRIPT" >/dev/null 2>&1 ); rc=$?
+[ "$rc" -eq 2 ] && ok || bad "an env provider without an env or flag model should hit the pairing check, got $rc"
 arg_is "--rounds needs a number"            1 --rounds abc
 arg_is "unknown flag"                       2 --nope
 # --angle: experiment wiring for the stale-comment pass
@@ -586,6 +592,46 @@ case "$out" in
   *) bad "a missing curl must hard-error, not skip the reachability check" ;;
 esac
 [ "$rc" -eq 1 ] && ok || bad "missing curl should exit 1, got $rc"
+
+# --- the mtplx provider: probed like llama-server, managed like it too --------
+# MTPLX's daemon owns its model, so the script must neither load nor unload
+# anything (no lms call at all) and must refuse with the shared "no server
+# answering at" line when :8000 is dead -- that prefix is what the bench
+# runners classify a refused arm by (bench/run_eval.sh SIG_SERVER).
+# Real curl against the same stand-ins tests/test_bench_runners.sh uses: a
+# file:// URL for "up" (curl -sf does not care about the scheme) and port 1
+# for "down", so the script's own `curl -sf --max-time` line is exercised.
+MSTUBS="$TMP/mstubs"; mkdir -p "$MSTUBS"
+cp "$STUBS/pi" "$MSTUBS/pi"
+cat > "$MSTUBS/lms" <<'LMSSTUB'
+#!/usr/bin/env bash
+echo "lms must not be called on the mtplx path" >&2
+exit 9
+LMSSTUB
+chmod +x "$MSTUBS/lms"
+printf '{"data":[]}\n' > "$TMP/mtplx-endpoint"
+out=$(cd "$REPO" && PATH="$MSTUBS:$PATH" HOME="$TMP/home" \
+      LOCAL_REVIEW_MTPLX_URL="file://$TMP/mtplx-endpoint" bash "$SCRIPT" --provider mtplx --model qwen38-mtplx 2>&1); rc=$?
+[ "$rc" -eq 0 ] && ok || bad "stubbed clean mtplx review should exit 0, got $rc ($(printf '%s' "$out" | head -1))"
+case "$out" in
+  *"lms must not be called"*|*loading*|*unloading*) bad "the mtplx path touched the LM Studio lifecycle" ;;
+  *) ok ;;
+esac
+# The env-default form must reach the same path: no flags at all.
+( cd "$REPO" && PATH="$MSTUBS:$PATH" HOME="$TMP/home" LOCAL_REVIEW_PROVIDER=mtplx LOCAL_REVIEW_MODEL=qwen38-mtplx \
+      LOCAL_REVIEW_MTPLX_URL="file://$TMP/mtplx-endpoint" bash "$SCRIPT" >/dev/null 2>&1 ); rc=$?
+[ "$rc" -eq 0 ] && ok || bad "LOCAL_REVIEW_PROVIDER/MODEL defaults should run the mtplx path, got $rc"
+out=$(cd "$REPO" && PATH="$MSTUBS:$PATH" HOME="$TMP/home" \
+      LOCAL_REVIEW_MTPLX_URL="http://127.0.0.1:1/v1/models" bash "$SCRIPT" --provider mtplx --model qwen38-mtplx 2>&1); rc=$?
+[ "$rc" -eq 1 ] && ok || bad "a dead MTPLX should exit 1, got $rc"
+case "$out" in
+  *"no server answering at http://127.0.0.1:1/v1/models"*) ok ;;
+  *) bad "a dead MTPLX must refuse with the bench-classified 'no server answering at' line, got: $(printf '%s' "$out" | head -1)" ;;
+esac
+case "$out" in
+  *MTPLX*) ok ;;
+  *) bad "the refusal should say how to start MTPLX" ;;
+esac
 
 # --- the two copies must not drift --------------------------------------------
 # review.sh is safety-critical and lives in two repos. Hand-porting it is what

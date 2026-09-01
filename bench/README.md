@@ -358,7 +358,9 @@ deliberate: it is not a dispatchable key, so a batch that aborts on one case
 does not permanently occupy it, and a resume that skips keys already recorded
 never mistakes an abort for a completed run.
 
-The probe only covers **llamaserver** — LM Studio does not serve the endpoint it
+The probe covers **llamaserver** and **mtplx** (each serves `/v1/models`, on
+:8080 and :8000; `LOCAL_REVIEW_LLAMA_URL` / `LOCAL_REVIEW_MTPLX_URL` override
+the URLs) — LM Studio does not serve the endpoint it
 curls. A dead LM Studio is therefore seen only through `review.sh`'s own
 refusal, which the classifier carries as a second server signature; without it a
 dead LM Studio would write a full arm of `SUSPECT` rows and exit 0, and those

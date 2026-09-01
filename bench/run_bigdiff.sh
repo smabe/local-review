@@ -39,8 +39,8 @@ PROVIDER="$1"; MODEL="$2"; RUNS="${3:-1}"; LABEL="${4:?label required}"
 # retyped from memory -- tests/test_bench_runners.sh ties each back to a live
 # message in scripts/review.sh.
 # TWO server signatures for the same reason as there: probe_server covers only
-# llamaserver, so a dead LM Studio is visible ONLY through review.sh's own
-# refusal (scripts/review.sh:154).
+# llamaserver and mtplx, so a dead LM Studio is visible ONLY through review.sh's own
+# refusal (scripts/review.sh:166).
 SIG_AUDIT='^local-review: audit: '
 SIG_SERVER='^local-review: no server answering at '
 SIG_LMSTUDIO='^local-review: LM Studio server is down on '
@@ -50,6 +50,7 @@ SIG_LOCK='^local-review: another local review (pid '
 # means "the fixture is invalid, do not resume".
 INFRA_EXIT=75
 LLAMA_URL="${LOCAL_REVIEW_LLAMA_URL:-http://localhost:8080/v1/models}"
+MTPLX_URL="${LOCAL_REVIEW_MTPLX_URL:-http://127.0.0.1:8000/v1/models}"
 PROBE_TRIES="${LOCAL_REVIEW_PROBE_TRIES:-5}"
 PROBE_SLEEP="${LOCAL_REVIEW_PROBE_SLEEP:-15}"
 
@@ -83,14 +84,20 @@ abort_infra() {
 # single-shot: a loaded machine mid-prefill does not answer promptly, and a
 # bigdiff run is the longest thing in the bench to lose to a false negative.
 probe_server() {
-  if [ "$PROVIDER" != "llamaserver" ]; then return 0; fi
+  # Same defaults and overrides as scripts/review.sh, because it is the same
+  # probe against the same endpoint.
+  case "$PROVIDER" in
+    llamaserver) _url="$LLAMA_URL" ;;
+    mtplx)       _url="$MTPLX_URL" ;;
+    *)           return 0 ;;
+  esac
   if ! command -v curl >/dev/null 2>&1; then return 0; fi
   _try=1
   while :; do
-    if curl -sf --max-time 10 "$LLAMA_URL" >/dev/null 2>&1; then return 0; fi
+    if curl -sf --max-time 10 "$_url" >/dev/null 2>&1; then return 0; fi
     if [ "$_try" -ge "$PROBE_TRIES" ]; then return 1; fi
     _try=$((_try + 1))
-    echo "run_bigdiff.sh: nothing answering at $LLAMA_URL, retry $_try/$PROBE_TRIES" >&2
+    echo "run_bigdiff.sh: nothing answering at $_url, retry $_try/$PROBE_TRIES" >&2
     sleep "$PROBE_SLEEP"
   done
 }
@@ -102,7 +109,7 @@ mkdir -p "$EVAL_DIR/logs"
 # Identical in shape and reasoning to run_eval.sh, which carries the full
 # commentary: resume reads the very file it appends to, so two batches racing on
 # one results file both compute the same missing set and both dispatch it. The
-# protocol is `mkdir` and nothing else (scripts/review.sh:210), nothing reclaims
+# protocol is `mkdir` and nothing else (scripts/review.sh:231), nothing reclaims
 # a lock it did not create, and the INT/TERM traps are what make that rule
 # affordable. Taken before the snapshot so a blocked batch leaves no copy
 # asserting it reached dispatch.

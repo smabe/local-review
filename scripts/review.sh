@@ -6,6 +6,8 @@
 #   ./review.sh --intent "Cache the parsed manifest so repeated loads skip disk."
 #   ./review.sh --rounds 5 --json
 #   ./review.sh --provider lmstudio --model qwen/qwen3-coder-30b   # fast tier
+#   ./review.sh --provider mtplx --model qwen38-mtplx                # MTPLX (MLX + MTP)
+#   LOCAL_REVIEW_PROVIDER=mtplx LOCAL_REVIEW_MODEL=qwen38-mtplx ./review.sh   # your own default
 #
 # This file is BYTE-IDENTICAL in smabe/abe-skills and the public smabe/local-review
 # (tests/test_local_review_audit.sh enforces it). Fix bugs here once; never
@@ -13,16 +15,21 @@
 #
 # The default reviewer is Qwen3.8-27B (thinking disabled) on llama-server --
 # start it first with scripts/llama_server.sh, which owns the model for the
-# life of the process. With --provider lmstudio the script manages the model
-# lifecycle instead: loads it if it isn't resident, and unloads it afterwards
-# -- but only if this run is what loaded it. A model you loaded yourself is
-# left exactly as it was found.
+# life of the process. MTPLX (--provider mtplx) is the same shape: its daemon
+# owns the model, so the script only checks that it answers on :8000. With
+# --provider lmstudio the script manages the model lifecycle instead: loads it
+# if it isn't resident, and unloads it afterwards -- but only if this run is
+# what loaded it. A model you loaded yourself is left exactly as it was found.
 #
 set -euo pipefail
 
-PROVIDER="llamaserver"
-MODEL="qwen38-gguf-nothink"
+# The shipped default is the measured llama-server arm. A machine that serves
+# something else sets its own default once, in the environment; --provider /
+# --model still win, and the pairing rule below treats an env model as explicit.
+PROVIDER="${LOCAL_REVIEW_PROVIDER:-llamaserver}"
+MODEL="${LOCAL_REVIEW_MODEL:-qwen38-gguf-nothink}"
 MODEL_EXPLICIT=0
+[ -n "${LOCAL_REVIEW_MODEL:-}" ] && MODEL_EXPLICIT=1
 CONTEXT_LENGTH=49152
 ROUNDS=3
 INTENT=""
@@ -33,9 +40,11 @@ RAW_STREAM=0
 RAW=""
 DIFF_TRUNCATION_BYTES=50000
 LOADED_BY_US=0
-# Must match the llamaserver baseUrl in ~/.pi/agent/models.json. Overridable
-# because that config owns the real value and this is only a reachability probe.
+# Must match the llamaserver / mtplx baseUrl in ~/.pi/agent/models.json.
+# Overridable because that config owns the real value and these are only
+# reachability probes.
 LLAMA_URL="${LOCAL_REVIEW_LLAMA_URL:-http://localhost:8080/v1/models}"
+MTPLX_URL="${LOCAL_REVIEW_MTPLX_URL:-http://127.0.0.1:8000/v1/models}"
 
 # `lms` is on PATH for some installs and only under ~/.lmstudio for others.
 LMS="$(command -v lms 2>/dev/null || true)"
@@ -69,10 +78,13 @@ usage: review.sh [--intent SENTENCE] [--angle NAME] [--rounds N] [--json]
                      finding.
   --json             Print pi's raw JSON event stream instead of the review.
                      Every run is audited either way; this shows the evidence.
-  --provider NAME    pi provider: llamaserver (default) or lmstudio.
+  --provider NAME    pi provider: llamaserver (default), mtplx, or lmstudio.
+                     LOCAL_REVIEW_PROVIDER in the environment changes the default.
   --model ID         Model id as named in ~/.pi/agent/models.json. llama-server
-                     models must already be served (scripts/llama_server.sh);
+                     models must already be served (scripts/llama_server.sh)
+                     and MTPLX models by its app or `mtplx quickstart`;
                      lmstudio models are loaded and unloaded for you.
+                     LOCAL_REVIEW_MODEL in the environment changes the default.
 
 Exit status: 0 clean, 1 error, 2 usage, 3 the verdict cannot be trusted (the
 model read nothing, said nothing, or produced output that is neither a clean
@@ -98,7 +110,7 @@ while [ $# -gt 0 ]; do
 done
 
 case "$PROVIDER" in
-  lmstudio|llamaserver) ;;
+  lmstudio|llamaserver|mtplx) ;;
   *) printf 'local-review: unknown provider: %s\n\n' "$PROVIDER" >&2; usage ;;
 esac
 
@@ -156,14 +168,23 @@ if [ "$PROVIDER" = "lmstudio" ]; then
       pi reports this only as a bare 'Connection error')"
   fi
 else
-  # llama-server has no CLI to interrogate; ask the endpoint itself. NOT
-  # optional: skipping it when curl is missing reintroduces the bare
-  # "Connection error" this check exists to translate.
+  # llama-server and MTPLX have no CLI worth interrogating here; ask the
+  # endpoint itself. NOT optional: skipping it when curl is missing
+  # reintroduces the bare "Connection error" this check exists to translate.
+  # Both die with the same "no server answering at" prefix: the bench runners
+  # classify a refused run by that line (bench/run_eval.sh SIG_SERVER).
+  if [ "$PROVIDER" = "mtplx" ]; then
+    PROBE_URL="$MTPLX_URL"
+    START_HINT="start MTPLX first: press play in the MTPLX app, or: mtplx quickstart --port 8000"
+  else
+    PROBE_URL="$LLAMA_URL"
+    START_HINT="start llama-server first:
+     scripts/llama_server.sh   (defaults to the measured Qwen3.8 reviewer)"
+  fi
   command -v curl >/dev/null 2>&1 \
-    || die "curl is needed to check the llama-server endpoint -- install it, or use --provider lmstudio"
-  curl -sf --max-time 5 "$LLAMA_URL" >/dev/null 2>&1 \
-    || die "no server answering at $LLAMA_URL -- start llama-server first:
-     scripts/llama_server.sh   (defaults to the Qwen3.8 reviewer, thinking off)"
+    || die "curl is needed to check the $PROVIDER endpoint -- install it, or use --provider lmstudio"
+  curl -sf --max-time 5 "$PROBE_URL" >/dev/null 2>&1 \
+    || die "no server answering at $PROBE_URL -- $START_HINT"
 fi
 
 # --- is there anything to review? --------------------------------------------
@@ -241,14 +262,15 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 # Unconditional: one machine serves one model at a time whichever provider is
-# in use (llama_server.sh runs llama-server with --parallel 1, a single slot),
+# in use (llama_server.sh runs llama-server with --parallel 1, a single slot;
+# MTPLX runs serial too),
 # and the lock has to be held for the whole run, not just the LM Studio
 # load/unload. Keeping it out of the branch also keeps LOCK non-empty, which is
 # what stops the EXIT trap rewriting the exit status on the llamaserver path.
 acquire_lock
 
-# llama-server owns its model for the life of the process, so the load/unload
-# below is LM Studio only.
+# llama-server and MTPLX own their model for the life of the process, so the
+# load/unload below is LM Studio only.
 if [ "$PROVIDER" = "lmstudio" ]; then
   # Captured for the same reason as the server check above: a non-zero lms
   # exit must not be read as "the model is not loaded", or we would unload and
@@ -387,7 +409,13 @@ run_pi() {
   # No --thinking here on purpose: pi only sends a reasoning level when the
   # provider sets a thinkingFormat or supportsReasoningEffort, and LM Studio
   # ignores every thinking-control field anyway (probed 2026-08-17). The flag
-  # would be inert -- see SKILL.md.
+  # would be inert -- see SKILL.md. The mtplx provider block is the exception:
+  # MTPLX writes thinkingFormat "qwen", so there the model entry's `reasoning`
+  # field decides -- `true` sends enable_thinking plus pi's default level
+  # (medium), `false` sends nothing and the daemon's own reasoning mode
+  # applies. The shipped qwen38-mtplx entry is reasoning: true, matching the
+  # measured arm (which thinks -- docs/thinking-off.md); a thinking-off entry
+  # reproduced that experiment's runaway on MTPLX too (docs/mtplx.md).
   pi --provider "$PROVIDER" --model "$MODEL" \
     --no-session -nc -ns --exclude-tools edit,write \
     --system-prompt "$SYSTEM_PROMPT" --mode json \

@@ -36,13 +36,13 @@ EXTRA_ARGS="${LOCAL_REVIEW_EVAL_ARGS:-}"
 # --- infrastructure failures are not model failures --------------------------
 #
 # The patterns the classifier below greps for, each ANCHORED on the
-# `local-review: ` prefix review.sh's die/note helpers add (scripts/review.sh:44-45).
+# `local-review: ` prefix review.sh's die/note helpers add (scripts/review.sh:53-54).
 # The anchor is not decoration: verdict reasons reach stderr under --json, which
 # is a single-word flag EXTRA_ARGS accepts, and a reviewed diff can contain any
 # of these phrases literally.
 #
 # SIG_AUDIT is an ALLOWLIST, not a blocklist. review.sh emits its audit footer
-# before all five of its audit exit paths (scripts/review.sh:556-557), so
+# before all five of its audit exit paths (scripts/review.sh:583-584), so
 # footer present <=> a measurement happened, whatever the exit code was. A
 # blocklist of known failure signatures is strictly weaker: the two below were
 # collected on one night that ALSO produced an exit-127 bash splice, which
@@ -52,10 +52,10 @@ EXTRA_ARGS="${LOCAL_REVIEW_EVAL_ARGS:-}"
 # still a live prefix of a real review.sh message, so a reword fails there
 # instead of silently matching nothing forever after.
 #
-# TWO server signatures, not one: probe_server below only covers llamaserver,
-# because that is the only provider serving the endpoint it curls. An lmstudio
+# TWO server signatures, not one: probe_server below only covers llamaserver
+# and mtplx, the providers serving an endpoint it can curl. An lmstudio
 # arm's reachability check lives inside review.sh, which refuses with a message
-# of its own shape (scripts/review.sh:154) -- so without SIG_LMSTUDIO a dead LM
+# of its own shape (scripts/review.sh:166) -- so without SIG_LMSTUDIO a dead LM
 # Studio falls through to SUSPECT, writes a full arm of rows, and exits 0. Under
 # resume those rows then claim their keys permanently and the documented
 # "re-run the identical command" recovery dispatches nothing at all.
@@ -68,9 +68,10 @@ SIG_LOCK='^local-review: another local review (pid '
 # EX_TEMPFAIL from sysexits.h, and it is deliberately NOT the existing exit 2,
 # which means the opposite -- "the fixture is invalid, do not resume".
 INFRA_EXIT=75
-# Same default and same override as scripts/review.sh:38, because it is the
+# Same default and same override as scripts/review.sh:46, because it is the
 # same probe against the same endpoint.
 LLAMA_URL="${LOCAL_REVIEW_LLAMA_URL:-http://localhost:8080/v1/models}"
+MTPLX_URL="${LOCAL_REVIEW_MTPLX_URL:-http://127.0.0.1:8000/v1/models}"
 PROBE_TRIES="${LOCAL_REVIEW_PROBE_TRIES:-5}"
 PROBE_SLEEP="${LOCAL_REVIEW_PROBE_SLEEP:-15}"
 
@@ -133,18 +134,25 @@ abort_infra() {
 # self-inflicted evidence loss. run_ctx_tiers.sh:130-139 retries for twenty
 # minutes for the same reason, against a server that is still loading.
 probe_server() {
-  # Only llamaserver serves this endpoint. lmstudio's own reachability check
-  # lives in review.sh and reports back through the classifier above.
-  if [ "$PROVIDER" != "llamaserver" ]; then return 0; fi
-  # A missing curl is review.sh's story to tell (scripts/review.sh:163); an
+  # llamaserver and mtplx each serve an endpoint curl can ask; lmstudio's own
+  # reachability check lives in review.sh and reports back through the
+  # classifier above.
+  # Same defaults and overrides as scripts/review.sh, because it is the same
+  # probe against the same endpoint.
+  case "$PROVIDER" in
+    llamaserver) _url="$LLAMA_URL" ;;
+    mtplx)       _url="$MTPLX_URL" ;;
+    *)           return 0 ;;
+  esac
+  # A missing curl is review.sh's story to tell (scripts/review.sh:184); an
   # infrastructure abort here would bury its far more specific message.
   if ! command -v curl >/dev/null 2>&1; then return 0; fi
   _try=1
   while :; do
-    if curl -sf --max-time 10 "$LLAMA_URL" >/dev/null 2>&1; then return 0; fi
+    if curl -sf --max-time 10 "$_url" >/dev/null 2>&1; then return 0; fi
     if [ "$_try" -ge "$PROBE_TRIES" ]; then return 1; fi
     _try=$((_try + 1))
-    echo "run_eval.sh: nothing answering at $LLAMA_URL, retry $_try/$PROBE_TRIES" >&2
+    echo "run_eval.sh: nothing answering at $_url, retry $_try/$PROBE_TRIES" >&2
     sleep "$PROBE_SLEEP"
   done
 }
@@ -164,7 +172,7 @@ mkdir -p "$EVAL_DIR/logs"
 # append to, so two batches racing on one results file both compute the same
 # missing set and both dispatch it -- duplicate keys, twice the GPU time, and no
 # trace in the rows of why. The protocol is `mkdir` and nothing else, exactly as
-# scripts/review.sh:210 does it: it succeeds for one process and fails for every
+# scripts/review.sh:231 does it: it succeeds for one process and fails for every
 # other, with no window between testing and claiming.
 #
 # NOTHING RECLAIMS A LOCK IT DID NOT CREATE. A "steal it if the owner looks
@@ -523,7 +531,7 @@ for run in $(seq 1 "$RUNS"); do
     # signal and both cells stay empty.
     #
     # The leading .* is not decoration: the line arrives through review.sh's
-    # `note` helper, which prefixes `local-review: ` (scripts/review.sh:45,679),
+    # `note` helper, which prefixes `local-review: ` (scripts/review.sh:54,679),
     # so a pattern anchored at ^verify: matches on no run ever made -- and the
     # symptom is two empty cells, identical to a run that never verified. Same
     # idiom as the nfind scrape above, for the same reason.

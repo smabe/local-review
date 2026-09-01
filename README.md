@@ -2,7 +2,8 @@
 
 A free, private, offline code reviewer that runs on your own machine. It
 drives a local model — anything you can serve on an OpenAI-compatible
-endpoint, llama-server or LM Studio — through the
+endpoint: llama-server, [MTPLX](https://github.com/youssofal/MTPLX), or LM
+Studio — through the
 [pi](https://github.com/earendil-works/pi) agent harness: it runs `git diff`,
 reads your changed files, and reports correctness bugs, touching no network.
 
@@ -56,7 +57,8 @@ mkdir -p ~/models && curl -L -o ~/models/Qwen3.8-27B-Q6_K.gguf \
 
 # Serve it on :8080. The script finds the GGUF, defaults context to 49152
 # (raise via LLAMA_CTX if that suits your machine -- see Context sizing),
-# and disables thinking, which is the measured reviewer configuration.
+# and passes --reasoning-budget 0 -- which is inert on the measured build, so the
+# reviewer thinks (docs/thinking-off.md); that IS the measured configuration.
 scripts/llama_server.sh
 ```
 
@@ -77,6 +79,29 @@ Optional fast tier (small diffs only), via LM Studio:
 #   --provider lmstudio --model qwen/qwen3-coder-30b
 ```
 
+Optional: the same Qwen3.8-27B through [MTPLX](https://github.com/youssofal/MTPLX)
+(MLX with native multi-token-prediction decoding, roughly twice llama-server's
+tokens per second on the same machine). Load the
+`Youssofal/Qwen3.8-27B-MTPLX-Optimized-Speed` pack in the MTPLX app and press
+play, or run `mtplx quickstart --port 8000`; the daemon owns the model, so
+review.sh only checks that `:8000/v1/models` answers:
+
+```bash
+scripts/review.sh --provider mtplx --model qwen38-mtplx
+# or, to make it this machine's default:
+export LOCAL_REVIEW_PROVIDER=mtplx LOCAL_REVIEW_MODEL=qwen38-mtplx
+```
+
+The `qwen38-mtplx` entry runs thinking ON, like the measured llama-server arm
+actually does (`docs/thinking-off.md`); a thinking-off variant reproduced that
+experiment's runaway on a large diff. Measured (`docs/mtplx.md`, 3 runs per
+seeded case): `offbyone` and `boolean` 3/3, `leak` 2/3, `swallow` 0/3,
+`clean` 0 findings 3/3, one finding per catch and never more, 15-33 s a case
+against 126-273 s on llama-server. Faster and less accurate on the hard
+cases, so it is a documented engine option, not the accuracy pick. The id is
+a local alias (MTPLX ignores the request's `model` field) and must not start
+with `mtplx-`, which `mtplx start pi` prunes on re-sync.
+
 ### 2. Install pi and configure the provider
 
 ```bash
@@ -87,13 +112,16 @@ mkdir -p ~/.pi/agent
 
 Copy [`models.example.json`](models.example.json) from this repo to
 `~/.pi/agent/models.json`. If the user already has a `models.json`, merge
-both provider blocks into it instead of overwriting. Do not add
-JSON comments — they fail silently.
+the provider blocks into it instead of overwriting. Do not add
+JSON comments — they fail silently, and so does a stray paste: pi ignores
+an unparseable `models.json` and every custom provider with it, so
+check it with `python3 -m json.tool ~/.pi/agent/models.json`.
 
-Any other model gets an entry alongside these two, under whichever of the
-two providers serves it, and is then selected with `--provider` / `--model`.
-The id must match what the server actually answers to: pi forwards an id its
-provider never declared without complaining, and the per-model sampling
+Any other model gets an entry alongside these, under whichever of the
+three providers serves it, and is then selected with `--provider` / `--model`.
+The id must match what the server actually answers to (MTPLX is the
+exception: it ignores the field, so its id is a local alias): pi forwards an
+id its provider never declared without complaining, and the per-model sampling
 settings then silently do not apply.
 
 Verify (first call wakes the model and can take ~60s; a repeat should
@@ -136,8 +164,8 @@ unloads it afterwards.
 | `--angle stalecomment` | opt-in single-class pass: reports ONLY comments and docstrings the changed code contradicts, quoting the comment line — the one class rule 2 bans from the default pass. It replaces the general review for that run, so run it in addition to the default pass, never instead; its exit 0 says nothing about correctness bugs. Measured fabrication-free (docs/angle-stale-comment.md); mutually exclusive with `--intent` |
 | `--verify` | opt-in second stage: each validated finding is adversarially re-checked by a verifier pass; refuted findings are dropped from the verdict but stay printed with the refutation reason. All findings refuted → exit 0 with a loud note. Measured: 14/14 true findings retained, 8/8 provably-false refuted (docs/verifier-pass.md, docs/verify-flag.md). Costs one generation per finding |
 | `--json` | print pi's raw event stream instead of the review; every run is audited either way |
-| `--provider NAME` | `llamaserver` (default) or `lmstudio` |
-| `--model ID` | model id as declared in `~/.pi/agent/models.json`; required whenever `--provider` is not the default |
+| `--provider NAME` | `llamaserver` (default), `mtplx`, or `lmstudio`. `LOCAL_REVIEW_PROVIDER` in the environment changes the default |
+| `--model ID` | model id as declared in `~/.pi/agent/models.json`; required whenever `--provider` is not the default. `LOCAL_REVIEW_MODEL` in the environment changes the default and counts as explicit |
 
 One machine has one resident model, so reviews are serialised: a run holds a
 lock for its whole duration, and a second run started while it is held exits
@@ -274,7 +302,7 @@ someone else's stated intent.
 | `tests/test_local_review_audit.sh` | The audit, the model lock, and argument validation. The code under test is extracted from `review.sh` at run time, so the tests cannot pass against a stale copy. Run with `bash tests/test_local_review_audit.sh`. Two drift checks report `SKIP` unless you also have the private repo checked out and point `LOCAL_REVIEW_MIRROR` at it — they compare this copy against its counterpart, which a standalone clone has nothing to compare to. `skipped=` in the footer is the count |
 | `tests/test_bench_runners.sh` | The second gate: the bench runners, which produce the evidence behind every model decision here. Runs whole batches against a shell stub, so no model is ever loaded and nothing writes into the real `bench/`. Run with `bash tests/test_bench_runners.sh`; it skips wholesale in a checkout without `bench/` |
 | `skill/SKILL.md` | The Claude Code skill — invocation, the intent caveat, hard limits |
-| `models.example.json` | pi provider config for LM Studio (:1234) and llama-server (:8080); the template for adding your own model |
+| `models.example.json` | pi provider config for llama-server (:8080), MTPLX (:8000) and LM Studio (:1234); the template for adding your own model |
 | `bench/` | The measurement instrument: seeded-defect cases, an 18KB big-diff fixture, frontier-model transcripts to score against, and the runners that replay them through the real `review.sh`. This is how you check whether a different model holds up |
 | `docs/model-choice.md` | Decision record: why these models, the prompts, the settings, the harness |
 | `docs/evict-gap.md` | How the purpose-anchored prompt (v7) was measured, and what it moved |
@@ -286,6 +314,7 @@ someone else's stated intent.
 | `docs/verify-flag.md` | the `--verify` wiring: design, decision rule, post-ship hardening, measured results |
 | `docs/rounds-experiment.md` | `--rounds 6` on the big diff: no ship — the 3-round cap stands on merit |
 | `docs/bold-finder-experiment.md` | relaxing unsure-omit under `--verify`: no ship (a trade), and the discovered `rename_prefix` bug |
+| `docs/mtplx.md` | MTPLX as a served engine: every probe, the thinking-off runaway that forced a thinking-on entry, the bench arms and decision rule |
 | `scripts/llama_server.sh` | Serves a GGUF via llama-server on :8080 — the measured default reviewer when called bare, or any model you pass a path and flags for |
 | `scripts/local_review.py` | Legacy diff-pipe: posts a diff straight to the API, no agent loop. Only useful with *thinking* models, which review diffs well but are too slow to finish agentically. Do NOT use the coder model with it — diff-blind, it fabricates findings |
 | `scripts/test_local_review_scope.py` | Regression tests for the diff-pipe's review scope (untracked files, empty repos) |
@@ -299,8 +328,10 @@ someone else's stated intent.
   6/8 trusted catches (zero false positives under the shipped prompt; two mid-iteration prompt variants did produce clean-diff fabrications) at ~5s a review; it reliably
   misses the hardest case (a swallowed error path causing silent data loss).
   **Qwen3.8-27B** caught 31/32 with zero false positives — and stays that
-  accurate on llama-server with thinking disabled (`--reasoning-budget 0`),
-  ~100s a review. Big-diff validated (18KB fixture, 2026-08-18):
+  accurate on llama-server served with `--reasoning-budget 0` — a flag that is
+  inert on the measured build, so the reviewer thinks and must keep thinking
+  (`docs/thinking-off.md`: genuinely off, it re-issues one command until the
+  watchdog and loses every catch) — ~100s a review. Big-diff validated (18KB fixture, 2026-08-18):
   no-think completes in 9-15 min with real findings and zero fabrications,
   while Qwen3-Coder false-cleaned the same diff twice in ~20s — use the
   accuracy pick for anything beyond a small diff. **Devstral Small 2 24B**: 5/8 strict, same
@@ -314,6 +345,9 @@ someone else's stated intent.
   pi does not send a level either unless the provider declares a
   `thinkingFormat` or `supportsReasoningEffort: true`. Seeing thinking blocks
   in the event stream proves thinking happened, not that a level was honoured.
+- **MTPLX does honour the request-level thinking switch**, which is why the
+  `qwen38-mtplx` entry leaves it ON: pinning it off reproduced the
+  thinking-off collapse on a large diff. Probes and rows: `docs/mtplx.md`.
 - **Leave LM Studio guardrails on Strict.**
 - **Review diffs, not whole files.** Pointed at committed files with no
   diff anchor, the reviewer fabricated 7/7 findings. If you must audit
@@ -334,9 +368,9 @@ someone else's stated intent.
 Serve it, declare it, run the bench against it:
 
 ```bash
-scripts/llama_server.sh ~/models/your-model.gguf        # or load it in LM Studio
+scripts/llama_server.sh ~/models/your-model.gguf        # or load it in LM Studio / MTPLX
 # add a matching entry to ~/.pi/agent/models.json, then:
-scripts/review.sh --provider llamaserver --model your-model-id
+scripts/review.sh --provider llamaserver --model your-model-id   # or --provider mtplx / lmstudio
 
 # score it: PROVIDER MODEL RUNS LABEL
 bench/run_eval.sh    llamaserver your-model-id 2 yourmodel   # 5 seeded one-bug diffs

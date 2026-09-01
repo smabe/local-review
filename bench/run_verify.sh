@@ -90,9 +90,10 @@ INFRA_EXIT=75
 # there would be a dead entry; tests/test_bench_runners.sh asserts that premise
 # rather than leaving it to a reader.
 TIMEOUT="${LOCAL_REVIEW_VERIFY_TIMEOUT:-600}"
-# Same default and same override as scripts/review.sh:38 and the other two
+# Same default and same override as scripts/review.sh:46 and the other two
 # runners, because it is the same probe against the same endpoint.
 LLAMA_URL="${LOCAL_REVIEW_LLAMA_URL:-http://localhost:8080/v1/models}"
+MTPLX_URL="${LOCAL_REVIEW_MTPLX_URL:-http://127.0.0.1:8000/v1/models}"
 PROBE_TRIES="${LOCAL_REVIEW_PROBE_TRIES:-5}"
 PROBE_SLEEP="${LOCAL_REVIEW_PROBE_SLEEP:-15}"
 
@@ -158,19 +159,25 @@ abort_infra() {
 # promptly, and killing a healthy arm on one false negative is self-inflicted
 # evidence loss.
 probe_server() {
-  # Only llamaserver serves this endpoint. An lmstudio arm is covered by the
-  # classifier alone, which is where a dead LM Studio surfaces anyway -- as a
-  # pi failure with nothing to show.
-  if [ "$PROVIDER" != "llamaserver" ]; then return 0; fi
+  # llamaserver and mtplx each serve an endpoint curl can ask. An lmstudio arm
+  # is covered by the classifier alone, which is where a dead LM Studio
+  # surfaces anyway -- as a pi failure with nothing to show.
+  # Same defaults and overrides as scripts/review.sh, because it is the same
+  # probe against the same endpoint.
+  case "$PROVIDER" in
+    llamaserver) _url="$LLAMA_URL" ;;
+    mtplx)       _url="$MTPLX_URL" ;;
+    *)           return 0 ;;
+  esac
   # A missing curl is not an infrastructure abort: it would bury the real cause
   # under a probe that never ran.
   if ! command -v curl >/dev/null 2>&1; then return 0; fi
   _try=1
   while :; do
-    if curl -sf --max-time 10 "$LLAMA_URL" >/dev/null 2>&1; then return 0; fi
+    if curl -sf --max-time 10 "$_url" >/dev/null 2>&1; then return 0; fi
     if [ "$_try" -ge "$PROBE_TRIES" ]; then return 1; fi
     _try=$((_try + 1))
-    echo "run_verify.sh: nothing answering at $LLAMA_URL, retry $_try/$PROBE_TRIES" >&2
+    echo "run_verify.sh: nothing answering at $_url, retry $_try/$PROBE_TRIES" >&2
     sleep "$PROBE_SLEEP"
   done
 }
@@ -182,7 +189,7 @@ mkdir -p "$EVAL_DIR/logs"
 # Identical in shape and reasoning to the other two runners, which carry the
 # full commentary: resume reads the very file it appends to, so two batches
 # racing on one results file both compute the same missing set and both dispatch
-# it. `mkdir` is the entire protocol (scripts/review.sh:210), nothing reclaims a
+# it. `mkdir` is the entire protocol (scripts/review.sh:231), nothing reclaims a
 # lock it did not create, and the INT/TERM traps are what make that affordable.
 RESULTS_LOCK="$RESULTS.lock"
 LOCK_HELD=""

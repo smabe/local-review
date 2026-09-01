@@ -20,7 +20,7 @@ set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # Explicit template rather than a bare `mktemp -d`: GNU coreutils rejects a
 # template with fewer than three X's, and the bare form ignores TMPDIR on macOS.
-# Same idiom, for the same portability reason, as scripts/review.sh:400.
+# Same idiom, for the same portability reason, as scripts/review.sh:428.
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/bench-runners.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 
@@ -573,7 +573,7 @@ done
 # --- verify columns, end to end through the real review.sh -------------------
 
 # The line these columns are scraped from is emitted through review.sh's `note`
-# helper, which prefixes `local-review: ` (scripts/review.sh:45,679) -- so a sed
+# helper, which prefixes `local-review: ` (scripts/review.sh:54,679) -- so a sed
 # anchored ^verify: matches nothing on every run, and the symptom is empty
 # columns, indistinguishable from a run that never verified. Only driving the
 # REAL script catches it; a hand-typed fixture would encode the bug.
@@ -962,8 +962,9 @@ if [ "$(field "$LOCKB_TSV" 2 2)" = "abort" ]; then ok; else bad "bigdiff termina
 
 # --- a dead LM Studio is infrastructure too ----------------------------------
 
-# probe_server only covers llamaserver: LM Studio does not serve the endpoint it
-# curls, so an lmstudio arm's reachability check lives inside review.sh and
+# probe_server covers only the providers that serve an endpoint it can curl
+# (llamaserver, mtplx): LM Studio does not, so an lmstudio arm's reachability
+# check lives inside review.sh and
 # reaches the runner only as a stderr signature. Without one, a dead LM Studio
 # falls through to SUSPECT, writes a full arm of rows and exits 0 — and under
 # resume those rows claim their keys permanently, so the documented "re-run the
@@ -1011,6 +1012,30 @@ if [ "$(wc -l < "$DOWN_TSV" | tr -d ' ')" = "2" ]; then ok; else bad "a dead-ser
 if [ "$(field "$DOWN_TSV" 2 10)" = "SERVER-DOWN" ]; then ok; else bad "terminal row status is '$(field "$DOWN_TSV" 2 10)', expected SERVER-DOWN"; fi
 # A run that never dispatched must leave no artifacts to be mistaken for one.
 if [ ! -e "$WS/bench/logs/down-label-offbyone-r1.txt" ]; then ok; else bad "a run that never dispatched still wrote a transcript"; fi
+
+# --- the same probe covers an mtplx arm, against its own endpoint -----------
+
+# MTPLX serves /v1/models on :8000 like llama-server does on :8080, so the
+# runner probes it directly rather than waiting for review.sh's refusal. The
+# URL knob is the mtplx one: an arm whose provider is mtplx must not be judged
+# by whether llama-server happens to be up.
+WS="$TMP/infra-mtplx-down"
+relocate run_eval.sh "$WS"
+cp "$TMP/stub-infra.sh" "$WS/scripts/review.sh"
+(
+    export LOCAL_REVIEW_EVAL_CASES="offbyone"
+    export LOCAL_REVIEW_MTPLX_URL="http://127.0.0.1:1/v1/models"
+    export LOCAL_REVIEW_PROBE_TRIES=2 LOCAL_REVIEW_PROBE_SLEEP=0
+    bash "$WS/bench/run_eval.sh" mtplx stub-model 2 mtplx-down-label
+) > "$WS/driver.log" 2>&1
+rc=$?
+MDOWN_TSV="$WS/bench/results.tsv"
+
+if [ "$rc" -eq "$INFRA_RC" ]; then ok; else bad "an mtplx batch against a dead MTPLX exited $rc, expected $INFRA_RC"; fi
+if [ "$(wc -l < "$MDOWN_TSV" | tr -d ' ')" = "2" ]; then ok; else bad "a dead-MTPLX batch wrote more than one terminal row"; fi
+if [ "$(field "$MDOWN_TSV" 2 10)" = "SERVER-DOWN" ]; then ok; else bad "mtplx terminal row status is '$(field "$MDOWN_TSV" 2 10)', expected SERVER-DOWN"; fi
+if [ ! -e "$WS/bench/logs/mtplx-down-label-offbyone-r1.txt" ]; then ok; else bad "an mtplx run that never dispatched still wrote a transcript"; fi
+if grep -q 'nothing answering at http://127.0.0.1:1/v1/models' "$WS/driver.log"; then ok; else bad "the mtplx arm probed something other than LOCAL_REVIEW_MTPLX_URL"; fi
 
 # --- server dies mid-batch: run 1 survives, run 2 aborts ---------------------
 

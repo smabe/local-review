@@ -1,6 +1,6 @@
 ---
 name: local-review
-description: Run a free, private code review on a local LLM served on this machine (llama-server or LM Studio) using the pi agent harness — the shipped default is Qwen3.8-27B no-think, with a Qwen3-Coder-30B fast tier for small diffs, and any other model selectable with --provider/--model. Advisory pre-pass only — it never replaces the real review gate. Use when the user asks for a local review, a free second opinion on a diff, or offline review.
+description: Run a free, private code review on a local LLM served on this machine (llama-server, MTPLX, or LM Studio) using the pi agent harness — the shipped default is Qwen3.8-27B no-think, with a Qwen3-Coder-30B fast tier for small diffs, and any other model selectable with --provider/--model. Advisory pre-pass only — it never replaces the real review gate. Use when the user asks for a local review, a free second opinion on a diff, or offline review.
 ---
 
 # local-review — code review on a local model
@@ -30,7 +30,7 @@ to get subtly wrong.
 | `--angle stalecomment` | opt-in single-class pass for stale comments/docstrings the changed code contradicts — the class the default pass is banned from reporting. Replaces the general review for that run: run it in addition to the default pass, never instead (its exit 0 says nothing about correctness bugs). Anchors findings on the comment line; mutually exclusive with `--intent` |
 | `--verify` | adversarially re-check each finding with a second model pass; refuted findings drop from the verdict (all-refuted → exit 0) but stay printed as evidence. Measured 14/14 retention / 8/8 refutation. One extra generation per finding |
 | `--json` | print pi's raw event stream instead of the review |
-| `--provider` / `--model` | switch engine/model — any id declared in `~/.pi/agent/models.json`, under `llamaserver` or `lmstudio`. E.g. `--provider lmstudio --model qwen/qwen3-coder-30b` for the ~5s fast tier on SMALL diffs (it false-cleans large ones) |
+| `--provider` / `--model` | switch engine/model — any id declared in `~/.pi/agent/models.json`, under `llamaserver`, `mtplx`, or `lmstudio`. E.g. `--provider lmstudio --model qwen/qwen3-coder-30b` for the ~5s fast tier on SMALL diffs (it false-cleans large ones), or `--provider mtplx --model qwen38-mtplx` for Qwen3.8 on the MTPLX daemon (:8000; ~2x llama-server's decode speed — docs/mtplx.md in the public repo has the rows). `LOCAL_REVIEW_PROVIDER` / `LOCAL_REVIEW_MODEL` in the environment change this machine's default |
 
 **It manages the model for you** (LM Studio only). If the model isn't resident
 it clears what is loaded, loads it at 49152 context, and unloads it when the
@@ -169,7 +169,16 @@ llama-server is the default engine: `"$LR"/scripts/llama_server.sh` serves a
 GGUF on :8080 and owns it for the life of the process — called bare it serves
 the measured default (Qwen3.8, thinking disabled), and it takes a model path
 plus flags for anything else. Zero crashes observed across the whole
-experiment. LM Studio (MLX) is the fast tier:
+experiment. MTPLX (MLX with native multi-token-prediction decoding) is the
+same shape as llama-server: its app or `mtplx quickstart --port 8000` owns the
+model, review.sh only checks that `:8000/v1/models` answers, and the
+`qwen38-mtplx` entry runs thinking ON like the measured arm (a thinking-off
+entry reproduced the thinking-off collapse on a large diff). Measured 3 runs
+per seeded case: offbyone/boolean 3/3, leak 2/3, swallow 0/3, clean 0/0, one
+finding per catch, 15-33 s a case — ~8x faster than llama-server and less
+accurate on the hard cases, so an engine option, not the accuracy pick
+(docs/mtplx.md in the public repo). LM
+Studio (MLX) is the fast tier:
 review.sh manages its model lifecycle for you, but its engine dies on long
 single generations — the 3-round budget exists because of it — and thinking
 cannot be controlled through its API.
