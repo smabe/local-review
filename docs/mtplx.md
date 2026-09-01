@@ -128,3 +128,42 @@ large diffs, so it is not a counter-argument.
 Open follow-ups, not decided here: the bigdiff fixture arm (blocked by the
 machine-wide commit gate refusing the fixture's bootstrap commit), and
 whether MTPLX's `reasoning_effort` above `medium` recovers `swallow`.
+
+## Arm 2: reasoning effort `low` (registered 2026-09-01, before any run)
+
+Entry `qwen38-mtplx-low`: identical to `qwen38-mtplx` plus
+`samplingParams.reasoning_effort: "low"`, which pi merges last and so
+overrides the `medium` it sends by default (probe-confirmed in MTPLX's
+`/metrics`: `request_reasoning_effort: low`). `xhigh` was ruled out by the
+operator as too much for this model.
+
+Hypothesis: less deliberation changes composition on the two hard cases in
+some direction; the arm exists to measure it, not to argue for it.
+
+Arm: `bench/run_eval.sh mtplx qwen38-mtplx-low 3 mtplx-think-low`, same five
+cases, compared row for row with `mtplx-think`.
+
+Decision rule: `low` REPLACES `medium` as the documented MTPLX entry iff
+`clean` stays at 0 findings on all runs AND its catches are a superset of
+`mtplx-think`'s on every case (no case loses a catch, at least one gains).
+Otherwise `medium` stays and the rows are kept as evidence.
+
+### Measured results (2026-09-01, `mtplx-think-low`, 3 runs per case)
+
+| case | low, runs 1-3 | medium (`mtplx-think`), runs 1-3 |
+|---|---|---|
+| `offbyone` | caught, caught, caught (44 / 30 / 32 s) | caught 3/3 |
+| `boolean` | caught, caught, caught (19 / 22 / 31 s) | caught 3/3 |
+| `leak` | caught, **missed**, **missed** (45 / 34 / 31 s) | caught 2/3 |
+| `swallow` | **missed** x3 (21 / 36 / 36 s) | missed 3/3 |
+| `clean` | 0 findings x3 (28 / 14 / 23 s) | 0 findings 3/3 |
+
+One finding per catch, never an extra; 2-5 tool calls per run. Wall time was
+not lower at `low` (14-45 s against 15-33 s) — less deliberation did not buy
+speed on these cases.
+
+### Verdict: NOT a superset — `leak` drops from 2/3 to 1/3, `swallow` stays at 0. `medium` stays as the documented entry.
+
+The `qwen38-mtplx-low` entry is removed from `models.example.json`; the rows
+stay. Effort is not the lever for the hard cases in either direction the
+operator was willing to try (`xhigh` ruled out as too much for this model).
