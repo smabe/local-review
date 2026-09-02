@@ -317,7 +317,7 @@ Rules you must obey:
 8. Before judging a changed hunk, read the complete enclosing function.
 9. If while writing or checking a finding you conclude the code is actually correct, discard that finding entirely. Never emit a finding and then argue against it.
 Each finding uses four labeled lines; keep every value on the same line as its label. One complete example (synthetic -- never echo it):
-FILE: example/demo.py:12 | confidence: high
+FILE: example/demo.py:12
 QUOTE: total =+ amount
 DEFECT: `=+` reassigns total to +amount instead of adding to it.
 FAILURE: Summing [5, 5] returns 5, not 10.
@@ -356,7 +356,7 @@ Rules you must obey:
 6. Before judging a comment, read the complete function or block it describes.
 7. If while writing or checking a finding you conclude the comment and code actually agree, discard that finding entirely. Never emit a finding and then argue against it.
 Each finding uses four labeled lines; keep every value on the same line as its label. One complete example (synthetic -- never echo it):
-FILE: example/demo.py:3 | confidence: high
+FILE: example/demo.py:3
 QUOTE: # retries three times before giving up
 DEFECT: The comment claims three retries; the request below runs once with no retry.
 FAILURE: A reader trusting the comment ships code that breaks on the first transient error.
@@ -381,10 +381,10 @@ Method: as you read each changed function, first determine that function's purpo
 fi
 
 PROMPT="${OPENING}${METHOD}
-HARD BUDGET: at most ${ROUNDS} rounds of tool calls, then give your verdict — batch commands (round 1: git status --short && ${DIFF_CMD}; round 2: read the changed files).
+HARD BUDGET: at most ${ROUNDS} rounds of tool calls, then give your verdict. A round is one turn; a turn may issue several tool calls, and one command may read every changed file. Batch: round 1: git status --short && ${DIFF_CMD}; round 2: read all changed files in a single command.
 Untracked files do not appear in ${DIFF_CMD}: enumerate them with git ls-files --others --exclude-standard and read them directly. Do not run git add.
 Report each defect in exactly this form, most severe first:
-FILE: path/to/file.py:LINE | confidence: high|medium|low
+FILE: path/to/file.py:LINE
 QUOTE: <the offending line, copied verbatim>
 DEFECT: <what is wrong with that line>
 FAILURE: <concrete input or state that produces wrong behaviour>

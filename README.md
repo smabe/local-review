@@ -174,7 +174,7 @@ lock for its whole duration, and a second run started while it is held exits
 immediately naming the process that holds it.
 
 Verify: in a repo with a deliberate bug, the script reports it as
-`FILE: path/to/file.py:LINE | confidence: ... / QUOTE: ... / DEFECT: ... / FAILURE: ...`
+`FILE: path/to/file.py:LINE / QUOTE: ... / DEFECT: ... / FAILURE: ...`
 followed by an audit line reading `audit: N/N tool calls ok, 1 defect(s), … tokens peak`.
 
 ---
@@ -197,8 +197,10 @@ actual diff. Same model, same verdict quality; the difference is purely
 overhead. (Claude Code *invoking* pi via the skill is fine — pi is the
 harness, Claude just launches it.)
 
-The review prompt carries a hard cap ("at most 3 rounds of tool calls,
-batch commands") which is **stability-critical** on LM Studio: its MLX engine
+The review prompt carries a hard cap ("at most 3 rounds of tool calls"; a
+round is one turn, and a turn may issue several tool calls or one command
+that reads every changed file — prompt v8, `docs/prompt-v8-round-semantics.md`)
+which is **stability-critical** on LM Studio: its MLX engine
 crashes on long single generations (~11K tokens). Capped rounds plus
 `maxTokens: 8192` keep every generation under the threshold. llama-server has
 not shown the problem, but the cap is the default on both paths — every
@@ -248,8 +250,11 @@ the "silently / spend output on the verdict" clause is what keeps the
 analysis out of the thinking channel — an earlier phrasing that asked for
 written notes hit the generation cap and produced no verdict at all.
 
-Findings come back structured — `FILE: path/to/file.py:LINE | confidence`, `QUOTE:`,
-`DEFECT:`, `FAILURE:` — which is what lets the script count them.
+Findings come back structured — `FILE: path/to/file.py:LINE`, `QUOTE:`,
+`DEFECT:`, `FAILURE:` — which is what lets the script count them. (A
+`| confidence:` tag used to follow the path; nothing read it, and dropping it
+held recall — `docs/prompt-v8-round-semantics.md`. The audit still ignores
+anything after the path, so older output parses.)
 
 ### Every run is audited
 
