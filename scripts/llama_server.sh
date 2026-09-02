@@ -4,8 +4,9 @@
 # see lmstudio-ai/mlx-engine#264).
 #
 # Usage: scripts/llama_server.sh [path-to-gguf] [extra llama-server flags...]
-# Default model: DEFAULT_MODEL below, named outright. A Qwen3.8 is served
-# thinking-off with f16 KV, exactly the measured arm; any explicitly passed
+# Default model: DEFAULT_MODEL below, named outright. A Qwen3.8 is served with
+# --reasoning-budget 0 (inert on the measured build, so it thinks -- see below
+# and docs/thinking-off.md) and f16 KV, exactly the measured arm; any explicitly passed
 # model gets q8_0 KV like the other measured arms. Pass a path plus your own
 # flags to serve anything else.
 set -euo pipefail

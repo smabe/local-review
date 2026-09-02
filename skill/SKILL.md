@@ -1,6 +1,6 @@
 ---
 name: local-review
-description: Run a free, private code review on a local LLM served on this machine (llama-server, MTPLX, or LM Studio) using the pi agent harness — the shipped default is Qwen3.8-27B no-think, with a Qwen3-Coder-30B fast tier for small diffs, and any other model selectable with --provider/--model. Advisory pre-pass only — it never replaces the real review gate. Use when the user asks for a local review, a free second opinion on a diff, or offline review.
+description: Run a free, private code review on a local LLM served on this machine (llama-server, MTPLX, or LM Studio) using the pi agent harness — the shipped default is Qwen3.8-27B (thinking on), with a Qwen3-Coder-30B fast tier for small diffs, and any other model selectable with --provider/--model. Advisory pre-pass only — it never replaces the real review gate. Use when the user asks for a local review, a free second opinion on a diff, or offline review.
 ---
 
 # local-review — code review on a local model
@@ -136,16 +136,17 @@ claims you have not checked against the source.
 - **Model choice is open; the defaults are just what survived measurement.**
   Nothing in the script pins a model — serve another one and select it with
   `--provider`/`--model`, and score it with the repo's `bench/` before trusting
-  it. What the candidates scored: Qwen3.8-27B no-think is the default,
+  it. What the candidates scored: Qwen3.8-27B is the default,
   Qwen3-Coder-30B the fast tier. A
   5-case seeded-defect eval (4 planted bugs + 1 clean diff, 2+ runs per arm,
   both engines, 2026-08-18) scored Qwen3-Coder 6/8 catches with zero false
   positives at ~5s/review — it reliably misses the hardest case (a swallowed
   error path causing silent data loss). Qwen3.8-27B caught 31/32 across every
   prompt version with zero false positives, and stays that accurate on
-  llama-server with thinking DISABLED (`--reasoning-budget 0`), ~40% faster
-  than thinking mode (~100s median). Big-diff validated (18KB fixture, 2026-08-18):
-  no-think completes in 9-15 min with real findings and zero fabrications,
+  llama-server served with `--reasoning-budget 0` — a flag that is inert on
+  the measured build, so the reviewer thinks and must keep thinking
+  (docs/thinking-off.md: genuinely off, six of eight runs produced no verdict at all) — ~100s median. Big-diff validated (18KB fixture, 2026-08-18):
+  Qwen3.8 completes in 9-15 min with real findings and zero fabrications,
   while Qwen3-Coder false-cleaned the same diff twice in ~20s — use the
   accuracy pick for anything beyond a small diff. Devstral Small 2 24B:
   5/8 strict (misses the same hard case both runs, plus intermittent leak
@@ -167,7 +168,7 @@ claims you have not checked against the source.
 
 llama-server is the default engine: `"$LR"/scripts/llama_server.sh` serves a
 GGUF on :8080 and owns it for the life of the process — called bare it serves
-the measured default (Qwen3.8, thinking disabled), and it takes a model path
+the measured default (Qwen3.8, thinking on), and it takes a model path
 plus flags for anything else. Zero crashes observed across the whole
 experiment. MTPLX (MLX with native multi-token-prediction decoding) is the
 same shape as llama-server: its app or `mtplx quickstart --port 8000` owns the

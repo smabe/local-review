@@ -20,7 +20,7 @@ Your choice — declare it in `~/.pi/agent/models.json` and select it with
 
 | tier | model | speed | use it for |
 |---|---|---|---|
-| **accuracy** (default) | Qwen3.8-27B, thinking disabled, on llama-server | ~1 min small diff, up to ~15 min large | everything |
+| **accuracy** (default) | Qwen3.8-27B on llama-server, thinking on (the `nothink` id is historical — docs/thinking-off.md) | ~1 min small diff, up to ~15 min large | everything |
 | **fast** | Qwen3-Coder-30B on LM Studio | ~5 s small diff | small diffs only — it false-cleans large ones |
 
 Those numbers are measured, not estimated; `bench/` holds the evidence and is
@@ -51,8 +51,10 @@ expect different wall-clock on different hardware.
 ### 1. Serve the model
 
 ```bash
-# Download the default reviewer GGUF (~21 GB, one time)
-mkdir -p ~/models && curl -L -o ~/models/Qwen3.8-27B-Q6_K.gguf \
+# Download the default reviewer GGUF (~21 GB, one time) to the path
+# scripts/llama_server.sh serves by default (DEFAULT_MODEL)
+mkdir -p ~/.lmstudio/models/lmstudio-community/Qwen3.8-27B-GGUF && curl -L \
+  -o ~/.lmstudio/models/lmstudio-community/Qwen3.8-27B-GGUF/Qwen3.8-27B-Q6_K.gguf \
   "https://huggingface.co/lmstudio-community/Qwen3.8-27B-GGUF/resolve/main/Qwen3.8-27B-Q6_K.gguf"
 
 # Serve it on :8080. The script serves the default GGUF, defaults context to 49152
@@ -68,7 +70,8 @@ Serving a different model instead: pass its path and any flags it needs —
 `scripts/llama_server.sh ~/models/your-model.gguf --whatever` — and add a
 matching entry to `~/.pi/agent/models.json` (step 2). The script never
 substitutes a model silently: with no path it serves the default named in
-`DEFAULT_MODEL`, and if that file is absent it falls back to discovery — which
+`DEFAULT_MODEL` (the path step 1 downloads to), and if that file is absent it
+falls back to discovery under `~/models` and `~/.lmstudio/models` — which
 lists the candidates and stops rather than guess when it finds more than one,
 since quants of one model differ in measured accuracy.
 
@@ -162,7 +165,7 @@ unloads it afterwards.
 | flag | what it does |
 |---|---|
 | `--intent "<sentence>"` | judge the diff against a stated purpose — read the caveat below before using it |
-| `--rounds N` | tool-call budget, default 3; raise to 4–5 when the review needs a codebase search pass |
+| `--rounds N` | round budget, default 3 — a round is one turn, which may issue several tool calls (prompt v8); raise to 4–5 when the review needs a codebase search pass |
 | `--angle stalecomment` | opt-in single-class pass: reports ONLY comments and docstrings the changed code contradicts, quoting the comment line — the one class rule 2 bans from the default pass. It replaces the general review for that run, so run it in addition to the default pass, never instead; its exit 0 says nothing about correctness bugs. Measured fabrication-free (docs/angle-stale-comment.md); mutually exclusive with `--intent` |
 | `--verify` | opt-in second stage: each validated finding is adversarially re-checked by a verifier pass; refuted findings are dropped from the verdict but stay printed with the refutation reason. All findings refuted → exit 0 with a loud note. Measured: 14/14 true findings retained, 8/8 provably-false refuted (docs/verifier-pass.md, docs/verify-flag.md). Costs one generation per finding |
 | `--json` | print pi's raw event stream instead of the review; every run is audited either way |
@@ -310,13 +313,18 @@ someone else's stated intent.
 | `tests/test_bench_runners.sh` | The second gate: the bench runners, which produce the evidence behind every model decision here. Runs whole batches against a shell stub, so no model is ever loaded and nothing writes into the real `bench/`. Run with `bash tests/test_bench_runners.sh`; it skips wholesale in a checkout without `bench/` |
 | `skill/SKILL.md` | The Claude Code skill — invocation, the intent caveat, hard limits |
 | `models.example.json` | pi provider config for llama-server (:8080), MTPLX (:8000) and LM Studio (:1234); the template for adding your own model |
-| `bench/` | The measurement instrument: seeded-defect cases, an 18KB big-diff fixture, frontier-model transcripts to score against, and the runners that replay them through the real `review.sh`. This is how you check whether a different model holds up |
+| `bench/` | The measurement instrument: seeded-defect cases, an 18KB big-diff fixture, frontier-model transcripts to score against, and the runners: `run_eval.sh` and `run_bigdiff.sh` replay the fixtures through the real `review.sh`, `run_ctx_tiers.sh` drives those two across context sizes, and `run_verify.sh` probes the verifier prompt through pi directly. This is how you check whether a different model holds up; `bench/README.md` explains the rows |
 | `docs/model-choice.md` | Decision record: why these models, the prompts, the settings, the harness |
 | `docs/evict-gap.md` | How the purpose-anchored prompt (v7) was measured, and what it moved |
 | `docs/angle-removed-behavior.md` | The removed-guard experiment behind the `removedguard` bench case |
 | `docs/experiment-loop.md` | the codified loop every reviewer change goes through: pre-registered hypothesis and decision rule, bench, ship or revert |
 | `docs/angle-stale-comment.md` | the stale-comment angle experiment: pre-registration, measured results, ship verdict |
 | `docs/angle-stale-removal.md` | removal-shaped staleness: the shipped angle covers it 3/3; the default pass reproduces the motivating miss |
+| `docs/prompt-v8-round-semantics.md` | prompt v8: a round is one turn, and the unread `confidence:` tag is gone — measured, shipped |
+| `docs/sampling-noise-floor.md` | how much run-to-run noise a 2-run arm carries at the shipped sampling settings, and the discovery that `--reasoning-budget 0` is inert |
+| `docs/thinking-off.md` | thinking genuinely off: NO SHIP — six of eight runs produced no verdict at all; the reviewer must think |
+| `docs/quant-swap.md` | the lmstudio-community Q6_K as default over Unsloth's: pre-registered rule, arms not yet run |
+| `docs/bench-hardening-spec.md` | the consensus spec behind the bench row schema, provenance columns, and resume semantics |
 | `docs/verifier-pass.md` | the verifier capability probe: 14/14 retention, 8/8 refutation on a 13-item corpus |
 | `docs/verify-flag.md` | the `--verify` wiring: design, decision rule, post-ship hardening, measured results |
 | `docs/rounds-experiment.md` | `--rounds 6` on the big diff: no ship — the 3-round cap stands on merit |
@@ -339,7 +347,7 @@ someone else's stated intent.
   inert on the measured build, so the reviewer thinks and must keep thinking
   (`docs/thinking-off.md`: genuinely off, it re-issues one command until the
   watchdog and loses every catch) — ~100s a review. Big-diff validated (18KB fixture, 2026-08-18):
-  no-think completes in 9-15 min with real findings and zero fabrications,
+  Qwen3.8 completes in 9-15 min with real findings and zero fabrications,
   while Qwen3-Coder false-cleaned the same diff twice in ~20s — use the
   accuracy pick for anything beyond a small diff. **Devstral Small 2 24B**: 5/8 strict, same
   hard-case blindness plus intermittent leak misses; its 2512 GGUFs do not

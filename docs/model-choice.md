@@ -1,5 +1,13 @@
 # Why Qwen3.8-27B (thinking off) is the default reviewer
 
+> **Correction, 2026-08-21.** The "thinking off" in this record was never
+> true: `--reasoning-budget 0` is inert on the measured llama.cpp build, so
+> every arm labelled `nothink` below was thinking (`docs/sampling-noise-floor.md`).
+> Genuinely off, the reviewer produced no verdict in six of eight runs and
+> was not shipped (`docs/thinking-off.md`). The scores stand; the label and
+> the "~40% less latency" explanation in "Why thinking is OFF" do not.
+> The text below is kept as written.
+
 Decision record, 2026-08-18. Everything numeric here is reproducible from
 `bench/` (`results.tsv` for the per-run rows, `run_eval.sh` to rerun an arm);
 nothing is anticipated or remembered from a model card.

@@ -13,8 +13,10 @@
 # (tests/test_local_review_audit.sh enforces it). Fix bugs here once; never
 # hand-adapt one copy.
 #
-# The default reviewer is Qwen3.8-27B (thinking disabled) on llama-server --
-# start it first with scripts/llama_server.sh, which owns the model for the
+# The default reviewer is Qwen3.8-27B on llama-server, thinking ON (the
+# `nothink` model id is historical: --reasoning-budget 0 is inert on the
+# measured build, and genuinely off it loses the verdict -- docs/thinking-off.md).
+# Start it first with scripts/llama_server.sh, which owns the model for the
 # life of the process. MTPLX (--provider mtplx) is the same shape: its daemon
 # owns the model, so the script only checks that it answers on :8000. With
 # --provider lmstudio the script manages the model lifecycle instead: loads it
@@ -62,7 +64,8 @@ usage: review.sh [--intent SENTENCE] [--angle NAME] [--rounds N] [--json]
                      about the change only. The reviewer treats anything
                      implementing it as correct by definition, so a wrong
                      sentence hides real bugs -- see SKILL.md before using.
-  --rounds N         Tool-call budget (default 3). Raise to 4-5 when the
+  --rounds N         Round budget (default 3). A round is one turn, which
+                     may issue several tool calls. Raise to 4-5 when the
                      review needs a codebase search pass. The cap is a
                      stability guard, not a speed knob.
   --angle NAME       Run a single-class angle pass instead of the general
