@@ -53,9 +53,9 @@ expect different wall-clock on different hardware.
 ```bash
 # Download the default reviewer GGUF (~21 GB, one time)
 mkdir -p ~/models && curl -L -o ~/models/Qwen3.8-27B-Q6_K.gguf \
-  "https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/main/Qwen3.8-27B-Q6_K.gguf"
+  "https://huggingface.co/lmstudio-community/Qwen3.8-27B-GGUF/resolve/main/Qwen3.8-27B-Q6_K.gguf"
 
-# Serve it on :8080. The script finds the GGUF, defaults context to 49152
+# Serve it on :8080. The script serves the default GGUF, defaults context to 49152
 # (raise via LLAMA_CTX if that suits your machine -- see Context sizing),
 # and passes --reasoning-budget 0 -- which is inert on the measured build, so the
 # reviewer thinks (docs/thinking-off.md); that IS the measured configuration.
@@ -67,8 +67,10 @@ Verify: `curl -s http://localhost:8080/health` returns `{"status":"ok"}`.
 Serving a different model instead: pass its path and any flags it needs —
 `scripts/llama_server.sh ~/models/your-model.gguf --whatever` — and add a
 matching entry to `~/.pi/agent/models.json` (step 2). The script never
-substitutes a model silently: with no path it serves the measured default or
-tells you it cannot find it.
+substitutes a model silently: with no path it serves the default named in
+`DEFAULT_MODEL`, and if that file is absent it falls back to discovery — which
+lists the candidates and stops rather than guess when it finds more than one,
+since quants of one model differ in measured accuracy.
 
 Optional fast tier (small diffs only), via LM Studio:
 

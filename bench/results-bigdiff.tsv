@@ -39,3 +39,9 @@ qwen38-nothink-bold-big-c	1	4	831	3	3	0	migrate_discard,import_after_guard,expor
 qwen38-nothink-bold-big-c	2	4	1750	5	5	0	import_after_guard,migrate_discard,export_exit0,cache_evict,export_default_ns
 qwen38-nothink-r3-base-c	1	4	529	5	5	0	import_after_guard,migrate_discard,cache_evict,export_exit0,export_default_ns
 qwen38-nothink-r3-base-c	2	4	559	3	3	0	import_after_guard,migrate_discard,export_exit0
+qwen38-t0-r3	1	4	755	3	3	0	import_after_guard,migrate_discard,export_exit0		2026-08-20	40cf4941b7dc		
+qwen38-t0-r3	2	4	763	3	3	0	import_after_guard,migrate_discard,export_exit0		2026-08-20	40cf4941b7dc		
+qwen38-t0-r3	3	4	767	3	3	0	import_after_guard,migrate_discard,export_exit0		2026-08-20	40cf4941b7dc		
+qwen38-t0-r6	1	4	745	5	5	0	import_after_guard,migrate_discard,cache_evict,export_exit0,export_default_ns		2026-08-20	40cf4941b7dc		
+qwen38-t0-r6	2	4	774	5	5	0	import_after_guard,migrate_discard,cache_evict,export_exit0,export_default_ns		2026-08-21	40cf4941b7dc		
+qwen38-t0-r6	3	4	820	5	5	0	import_after_guard,migrate_discard,cache_evict,export_exit0,export_default_ns		2026-08-21	40cf4941b7dc		

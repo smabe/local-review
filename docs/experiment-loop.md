@@ -26,8 +26,15 @@ pre-registered rule made either verdict trustworthy.
 
 3. **Run the real pipeline.** Bench through `scripts/review.sh` — prompt,
    audit, engine, and exit contract together, never the model in isolation.
-   At least 2 runs per small-case arm. Distinct label, append-only
-   `results.tsv`, never rewrite rows. Before labeling an arm, verify what is
+   Bench on `qwen38-gguf-nothink-t0` (temperature 0): measured byte-identical
+   across 4 runs on every small case and 3 runs on the bigdiff, so ONE run per
+   arm is a measurement and reps buy nothing — grow CASES instead
+   (`docs/sampling-noise-floor.md`). Three identical runs are still one sample:
+   determinism removes sampling noise, it does not widen coverage. Arms at the
+   shipped 0.7 sampling need enough runs to cross the measured noise floor —
+   19% pair-disagreement on the least stable cases — and a per-bug decision
+   rule must state its false-reject rate against an identical variant before it
+   is used. Distinct label, append-only `results.tsv`, never rewrite rows. Before labeling an arm, verify what is
    actually being served (`curl :8080/v1/models` — the readiness probe only
    proves a port answers).
 

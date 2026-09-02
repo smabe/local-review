@@ -58,3 +58,29 @@ Observation recorded, no claim: cache_evict was caught twice tonight (once
 per arm here, once in the --verify bigdiff run) after exactly one catch in
 all prior history — all tonight's runs are prompt v7. Possibly v7's purpose
 anchoring, possibly variance; a dedicated arm would be needed to say.
+
+## Appended 2026-08-21 — re-measured at temperature 0
+
+`docs/sampling-noise-floor.md` re-ran these two arms on the same fixture with
+the same rule, changing only sampling (`qwen38-gguf-nothink-t0`, temperature 0).
+Every run in each arm came back byte-identical, and the result inverts:
+
+| arm | hits | per-bug composition | unmatched |
+|---|---|---|---|
+| `--rounds 3` | 3 | import_after_guard · migrate_discard · export_exit0 | 0 |
+| `--rounds 6` | 5 | the same three, plus cache_evict and export_default_ns | 0 |
+
+r6 is a strict superset of r3, which satisfies this doc's SHIP clause verbatim.
+
+The verdict above is left standing rather than edited, and two of its findings
+survive intact: the r6 run that exited 3 with no verdict was real, and
+generation starvation on llama-server is real. What does not survive is the
+per-bug composition clause as EVIDENCE — modelling two identical arms as
+Binomial(3, 0.89) per bug, "B >= A on every bug" rejects a genuinely equal
+variant 62% of the time, and the rate rises with more runs rather than falling.
+The FAIL recorded here is consistent with r6 being better, equal, or worse.
+
+Not re-opened as a recommendation: this was one deterministic sample on one
+diff, thinking was on in both arms (see the sampling doc's note on the inert
+`--reasoning-budget 0`), and the starvation risk is unmeasured at temperature 0.
+Reaching a recommendation needs a fresh pre-registration with more cases.

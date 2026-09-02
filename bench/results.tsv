@@ -318,6 +318,38 @@ qwen38-nothink-bold	clean	2	0	0	72	0	0	0
 qwen38-nothink-bold	swallow	2	4	4	245	1	1	1
 qwen38-nothink-bold	offbyone	2	4	4	126	1	1	1
 qwen38-nothink-bold	boolean	2	4	4	181	1	1	1
+qwen38-t0-det	swallow	1	4	4	147	1	0	0		2026-08-20	40cf4941b7dc		
+qwen38-t0-det	leak	1	4	4	176	1	1	1		2026-08-20	40cf4941b7dc		
+qwen38-t0-det	offbyone	1	4	4	60	1	1	1		2026-08-20	40cf4941b7dc		
+qwen38-t0-det	clean	1	0	0	69	0	0	0		2026-08-20	40cf4941b7dc		
+qwen38-t0-det	swallow	2	4	4	143	1	0	0		2026-08-20	40cf4941b7dc		
+qwen38-t0-det	leak	2	4	4	181	1	1	1		2026-08-20	40cf4941b7dc		
+qwen38-t0-det	offbyone	2	4	4	61	1	1	1		2026-08-20	40cf4941b7dc		
+qwen38-t0-det	clean	2	0	0	77	0	0	0		2026-08-20	40cf4941b7dc		
+qwen38-t0-det	swallow	3	4	4	146	1	0	0		2026-08-20	40cf4941b7dc		
+qwen38-t0-det	leak	3	4	4	182	1	1	1		2026-08-20	40cf4941b7dc		
+qwen38-t0-det	offbyone	3	4	4	60	1	1	1		2026-08-20	40cf4941b7dc		
+qwen38-t0-det	clean	3	0	0	44	0	0	0		2026-08-20	40cf4941b7dc		
+qwen38-t0-det	swallow	4	4	4	146	1	0	0		2026-08-20	40cf4941b7dc		
+qwen38-t0-det	leak	4	4	4	180	1	1	1		2026-08-20	40cf4941b7dc		
+qwen38-t0-det	offbyone	4	4	4	61	1	1	1		2026-08-20	40cf4941b7dc		
+qwen38-t0-det	clean	4	0	0	44	0	0	0		2026-08-20	40cf4941b7dc		
+qwen38-t0-nothink-det	swallow	1	0	4	29	0	0	0		2026-08-21	40cf4941b7dc		
+qwen38-t0-nothink-det	leak	1	124	4	901	0	0	0		2026-08-21	40cf4941b7dc		
+qwen38-t0-nothink-det	offbyone	1	124	4	900	0	0	0		2026-08-21	40cf4941b7dc		
+qwen38-t0-nothink-det	clean	1	0	0	24	0	0	0		2026-08-21	40cf4941b7dc		
+qwen38-t0-nothink-det	swallow	2	124	4	900	0	0	0		2026-08-21	40cf4941b7dc		
+qwen38-t0-nothink-det	leak	2	124	4	900	0	0	0		2026-08-21	40cf4941b7dc		
+qwen38-t0-nothink-det	offbyone	2	124	4	901	0	0	0		2026-08-21	40cf4941b7dc		
+qwen38-t0-nothink-det	clean	2	0	0	24	0	0	0		2026-08-21	40cf4941b7dc		
+qwen38-ctk-nothink	swallow	1	124	4	420	0	0	0		2026-08-21	40cf4941b7dc		
+qwen38-ctk-nothink	leak	1	124	4	420	0	0	0		2026-08-21	40cf4941b7dc		
+qwen38-ctk-nothink	offbyone	1	124	4	420	0	0	0		2026-08-21	40cf4941b7dc		
+qwen38-ctk-nothink	clean	1	0	0	25	0	0	0		2026-08-21	40cf4941b7dc		
+qwen38-ctk-nothink	swallow	2	124	4	420	0	0	0		2026-08-21	40cf4941b7dc		
+qwen38-ctk-nothink	leak	2	124	4	420	0	0	0		2026-08-21	40cf4941b7dc		
+qwen38-ctk-nothink	offbyone	2	124	4	420	0	0	0		2026-08-21	40cf4941b7dc		
+qwen38-ctk-nothink	clean	2	0	0	24	0	0	0		2026-08-21	40cf4941b7dc		
 mtplx-native	offbyone	1	4	4	17	2	1	1		2026-09-01	fb83ec6bb52d		
 mtplx-native	swallow	1	4	4	22	2	1	1		2026-09-01	fb83ec6bb52d		
 mtplx-native	clean	1	0	0	7	0	0	0		2026-09-01	fb83ec6bb52d		
