@@ -268,6 +268,43 @@ done
 snapshots "$WS/bench/logs"
 if [ "$SNAP_N" = "2" ]; then ok; else bad "two batches under one label produced $SNAP_N snapshots, expected 2"; fi
 
+# --- a bootstrap the commit gate refused completes on the next run ----------
+
+# A global core.hooksPath review gate refuses the fixture repo's first commit,
+# which leaves `git init` + staged base files and no HEAD. The runners gate
+# bootstrap on HEAD (not on .git) and set the gate's per-repo opt-out, so the
+# retry lands the base commit instead of running against an unborn repo.
+for _runner in run_eval.sh run_bigdiff.sh; do
+    case "$_runner" in
+        run_eval.sh)    _fixrepo=eval-repo;    _base="$ROOT/bench/base" ;;
+        run_bigdiff.sh) _fixrepo=bigdiff-repo; _base="$ROOT/bench/bigdiff/base" ;;
+    esac
+    WS="$TMP/unborn-${_runner%.sh}"
+    relocate "$_runner" "$WS"
+    cp "$TMP/stub-v1.sh" "$WS/scripts/review.sh"
+    mkdir -p "$WS/bench/$_fixrepo"
+    cp "$_base"/*.py "$WS/bench/$_fixrepo/"
+    git -C "$WS/bench/$_fixrepo" init -q
+    git -C "$WS/bench/$_fixrepo" add -A
+    (
+        export STUB_MARKER="$WS/marker.txt" STUB_SRC="$WS/scripts/review.sh"
+        export LOCAL_REVIEW_EVAL_CASES="offbyone"
+        bash "$WS/bench/$_runner" stub-provider stub-model 1 unborn-label
+    ) > "$WS/driver.log" 2>&1
+    rc=$?
+    if [ "$rc" -eq 0 ]; then ok; else bad "$_runner from an unborn $_fixrepo exited $rc (see $WS/driver.log)"; fi
+    if git -C "$WS/bench/$_fixrepo" rev-parse --verify --quiet HEAD >/dev/null 2>&1; then
+        ok
+    else
+        bad "$_runner left $_fixrepo with no HEAD: the refused bootstrap was not completed"
+    fi
+    if [ "$(git -C "$WS/bench/$_fixrepo" config --local --get review.gate 2>/dev/null)" = "off" ]; then
+        ok
+    else
+        bad "$_runner did not set review.gate off in $_fixrepo"
+    fi
+done
+
 # --- run_bigdiff.sh takes the same snapshot ----------------------------------
 
 WS="$TMP/bigdiff"

@@ -466,10 +466,14 @@ mean there is no usable verdict at all, which is a different failure. Scoring
 them as fabrications invents ones that never happened and double-reports the
 same run.
 
-**The commit gate blocks the runners' bootstrap commits.** It cannot resolve a
-repo whose path comes from a shell variable, which is exactly how both runners
-reach their fixture repo. The repos therefore have to exist before the runners
-run. They do; recreating them from scratch needs operator approval for the gate.
+**The commit gate would block the runners' bootstrap commits.** A global
+`core.hooksPath` review gate fires on the fixture repo's first commit, and a
+refused commit leaves an initialised repo with no HEAD that `case.patch` cannot
+apply to. Every runner therefore sets `review.gate off` in the fixture repo it
+creates (the gate's own per-repo opt-out) and treats a missing HEAD, not a
+missing `.git`, as "not bootstrapped", so a refused bootstrap completes on the
+next run. Deleting `eval-repo/` or `bigdiff-repo/` to re-bootstrap needs no
+operator approval.
 
 `git clean` will not remove the big diff's two new files between runs — `git
 add -N` puts them in the index, so `git apply` then refuses to overwrite them.

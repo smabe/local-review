@@ -190,10 +190,17 @@ fi
 # rebuilding it per run would mean a fresh commit per run. Hygiene against a
 # repo left dirty by an interrupted run comes from the reset before each run
 # below, which restores the base commit exactly.
-if [ ! -d "$REPO/.git" ]; then
+if ! git -C "$REPO" rev-parse --verify --quiet HEAD >/dev/null 2>&1; then
   mkdir -p "$REPO"
   cp "$FIXTURE"/base/*.py "$REPO/"
   git -C "$REPO" init -q
+  # A global core.hooksPath commit gate (the review gate in ~/.claude/git-hooks)
+  # fires on this bootstrap commit and blocks it, and case.patch then has no
+  # base to apply to. The gate honours a per-repo opt-out; this fixture is
+  # throwaway, so turn it off here and nowhere else. The guard is HEAD, not
+  # .git: a bootstrap the gate refused leaves an initialised repo with no
+  # commit, and a .git test would skip straight past this block on the retry.
+  git -C "$REPO" config --local review.gate off
   git -C "$REPO" add -A
   git -C "$REPO" commit -qm "base: store, parser, cache, serialize, cli"
 fi

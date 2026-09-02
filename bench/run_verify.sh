@@ -218,9 +218,17 @@ LOCK_HELD="$RESULTS_LOCK"
 trap 'exit 130' INT; trap 'exit 143' TERM
 printf '%s\n' "$$" > "$RESULTS_LOCK/pid" || echo "run_verify.sh: could not record the lock owner pid" >&2
 
-if [ ! -d "$REPO/.git" ]; then
+if ! git -C "$REPO" rev-parse --verify --quiet HEAD >/dev/null 2>&1; then
   mkdir -p "$REPO"; cp "$EVAL_DIR"/base/*.py "$REPO/"
-  git -C "$REPO" init -q; git -C "$REPO" add -A
+  git -C "$REPO" init -q
+  # A global core.hooksPath commit gate (the review gate in ~/.claude/git-hooks)
+  # fires on this bootstrap commit and blocks it, and case.patch then has no
+  # base to apply to. The gate honours a per-repo opt-out; this fixture is
+  # throwaway, so turn it off here and nowhere else. The guard is HEAD, not
+  # .git: a bootstrap the gate refused leaves an initialised repo with no
+  # commit, and a .git test would skip straight past this block on the retry.
+  git -C "$REPO" config --local review.gate off
+  git -C "$REPO" add -A
   git -C "$REPO" commit -qm "base: store + parser"
 fi
 [ -f "$RESULTS" ] || printf 'label\titem\trun\tverdict\ttruth\tgating\tsecs\tagree\tstatus\tdate\tsha\n' > "$RESULTS"
